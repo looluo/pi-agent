@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,60 @@ function replaceInFile(file, search, replacement) {
     throw new Error(`Expected text not found in ${file}: ${search}`);
   }
   writeFileSync(file, text.replace(search, replacement));
+}
+
+function walkFiles(dir, visit) {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) walkFiles(path, visit);
+    else if (entry.isFile()) visit(path);
+  }
+}
+
+function pruneWebapp(dir) {
+  const removeDirs = [
+    join(dir, "node_modules", "@img"),
+    join(dir, "node_modules", "sharp"),
+    join(dir, "node_modules", "next", "dist", "compiled", "next-devtools"),
+    join(dir, "node_modules", "next", "dist", "compiled", "babel"),
+    join(dir, "node_modules", "next", "dist", "compiled", "babel-packages"),
+    join(dir, "node_modules", "caniuse-lite"),
+    join(dir, "node_modules", "baseline-browser-mapping"),
+  ];
+  for (const path of removeDirs) {
+    rmSync(path, { recursive: true, force: true });
+  }
+
+  const removableDirs = new Set(["test", "tests", "__tests__", "docs", "doc", "example", "examples", "benchmark", "benchmarks"]);
+  function pruneDirs(current) {
+    if (!existsSync(current)) return;
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (!entry.isDirectory()) continue;
+      if (removableDirs.has(entry.name.toLowerCase())) {
+        rmSync(path, { recursive: true, force: true });
+      } else {
+        pruneDirs(path);
+      }
+    }
+  }
+  pruneDirs(join(dir, "node_modules"));
+
+  walkFiles(dir, (path) => {
+    if (/\.map$|\.d\.ts$|\.tsbuildinfo$|\.md$|\.markdown$|\.flow$/i.test(path)) {
+      unlinkSync(path);
+      return;
+    }
+    if (/\.nft\.json$/i.test(path)) {
+      unlinkSync(path);
+      return;
+    }
+    const name = path.split(/[\\/]/).pop()?.toLowerCase();
+    if (name && ["license", "license.txt", "license.md", "changelog.md", "readme.md", "readme"].includes(name)) {
+      unlinkSync(path);
+    }
+  });
 }
 
 rmSync(work, { recursive: true, force: true });
@@ -65,6 +119,8 @@ cpSync(join(work, ".next", "static"), join(webapp, ".next", "static"), { recursi
 if (existsSync(join(work, "public"))) {
   cpSync(join(work, "public"), join(webapp, "public"), { recursive: true });
 }
+
+pruneWebapp(webapp);
 
 writeFileSync(
   join(resources, "metadata.json"),

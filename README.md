@@ -33,7 +33,9 @@ src-tauri/target/release/bundle/dmg/*.dmg
 - If Node.js is not found, the app shows an installation prompt and asks the user to restart after installing Node.js.
 - Set `PI_AGENT_NODE` to a full Node executable path when Node.js is installed in a custom location.
 - `scripts/build-webapp.mjs` packages the Next.js standalone server under `src-tauri/resources/webapp`.
+- The build script prunes non-runtime files from the standalone output, including trace JSON, source maps, docs, tests, and unused image optimization packages.
 - `src-tauri/build.rs` embeds the Next.js standalone server into the Tauri executable.
+- Embedded web assets are zlib-compressed before they are included in the executable.
 - At runtime, Tauri extracts the embedded web assets into the app data directory on first launch or after the embedded assets change. Later launches reuse the cached `standalone/<version>-<asset-id>/webapp` directory and skip extraction.
 - Tauri starts system Node.js with `webapp/server.js` on a random localhost port and opens the desktop window to that URL.
 

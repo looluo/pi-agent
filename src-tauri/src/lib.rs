@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -8,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{Manager, Url};
+
+use flate2::read::ZlibDecoder;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -134,7 +137,7 @@ fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        write_if_changed(&path, bytes)?;
+        write_if_changed(&path, &bytes)?;
     }
 
     fs::write(root.join(".complete"), EMBEDDED_ASSET_ID)?;
@@ -236,8 +239,10 @@ fn percent_encode(input: &str) -> String {
     })
 }
 
-fn unpack_embedded_assets() -> Result<Vec<(&'static str, &'static [u8])>> {
-    let mut cursor = EMBEDDED_ASSETS;
+fn unpack_embedded_assets() -> Result<Vec<(String, Vec<u8>)>> {
+    let mut decoded = Vec::new();
+    ZlibDecoder::new(EMBEDDED_ASSETS).read_to_end(&mut decoded)?;
+    let mut cursor = decoded.as_slice();
     if cursor.len() < 12 || &cursor[..8] != b"PIAPACK1" {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid embedded asset pack").into());
     }
@@ -251,15 +256,16 @@ fn unpack_embedded_assets() -> Result<Vec<(&'static str, &'static [u8])>> {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated embedded asset pack").into());
         }
         let path = std::str::from_utf8(&cursor[..path_len])
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        let data = &cursor[path_len..path_len + data_len];
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+            .to_string();
+        let data = cursor[path_len..path_len + data_len].to_vec();
         cursor = &cursor[path_len + data_len..];
         files.push((path, data));
     }
     Ok(files)
 }
 
-fn read_u32(cursor: &mut &'static [u8]) -> Result<u32> {
+fn read_u32(cursor: &mut &[u8]) -> Result<u32> {
     if cursor.len() < 4 {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u32").into());
     }
@@ -268,7 +274,7 @@ fn read_u32(cursor: &mut &'static [u8]) -> Result<u32> {
     Ok(u32::from_le_bytes(bytes.try_into().expect("slice length checked")))
 }
 
-fn read_u64(cursor: &mut &'static [u8]) -> Result<u64> {
+fn read_u64(cursor: &mut &[u8]) -> Result<u64> {
     if cursor.len() < 8 {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u64").into());
     }
