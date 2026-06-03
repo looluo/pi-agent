@@ -1,0 +1,28 @@
+[package]
+name = "pi-agent"
+version = "0.1.0"
+description = "Pi Agent desktop app"
+authors = ["Pi Agent"]
+edition = "2021"
+
+[lib]
+name = "pi_agent_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "pi-agent"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+portpicker = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rustls-native-certs = "0.8"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+thiserror = "2"
+url = "2"
