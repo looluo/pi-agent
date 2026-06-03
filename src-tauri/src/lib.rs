@@ -1,7 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
     fs,
-    io,
+    io::{self, Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -68,8 +69,12 @@ pub fn run() {
 }
 
 #[tauri::command]
-fn window_control(window: tauri::Window, action: String) -> std::result::Result<(), String> {
-    match action.as_str() {
+fn window_control(window: tauri::WebviewWindow, action: String) -> std::result::Result<(), String> {
+    apply_window_action(&window, &action)
+}
+
+fn apply_window_action(window: &tauri::WebviewWindow, action: &str) -> std::result::Result<(), String> {
+    match action {
         "minimize" => window.minimize().map_err(|err| err.to_string()),
         "maximize" => {
             if window.is_maximized().map_err(|err| err.to_string())? {
@@ -78,9 +83,44 @@ fn window_control(window: tauri::Window, action: String) -> std::result::Result<
                 window.maximize().map_err(|err| err.to_string())
             }
         }
+        "drag" => window.start_dragging().map_err(|err| err.to_string()),
         "close" => window.close().map_err(|err| err.to_string()),
         _ => Err(format!("unknown window action: {action}")),
     }
+}
+
+fn start_control_server(app: tauri::AppHandle) -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            handle_control_request(&app, stream);
+        }
+    });
+    Ok(port)
+}
+
+fn handle_control_request(app: &tauri::AppHandle, mut stream: TcpStream) {
+    let mut buffer = [0_u8; 1024];
+    let Ok(read) = stream.read(&mut buffer) else { return; };
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let action = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|path| path.split("action=").nth(1))
+        .map(|value| value.split(&['&', ' '][..]).next().unwrap_or(value))
+        .unwrap_or("");
+
+    let status = if let Some(window) = app.get_webview_window("main") {
+        apply_window_action(&window, action).map(|_| "204 No Content").unwrap_or("400 Bad Request")
+    } else {
+        "404 Not Found"
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(response.as_bytes());
 }
 
 fn stop_sidecar(app: &tauri::AppHandle) {
@@ -97,6 +137,7 @@ fn setup_app(app: tauri::AppHandle) -> Result<()> {
     let ca_bundle = write_system_ca_bundle(&app)?;
     let assets = extract_embedded_assets(&app)?;
     let port = portpicker::pick_unused_port().ok_or(AppError::NoPort)?;
+    let control_port = start_control_server(app.clone())?;
 
     let mut command = Command::new(&assets.node);
     command
@@ -115,7 +156,7 @@ fn setup_app(app: tauri::AppHandle) -> Result<()> {
     let child = command.spawn()?;
     app.state::<AppState>().child.lock().expect("state poisoned").replace(child);
 
-    let url = format!("http://127.0.0.1:{port}");
+    let url = format!("http://127.0.0.1:{port}?tauriControlPort={control_port}");
     wait_for_server(&url)?;
 
     let window = app.get_webview_window("main").ok_or(AppError::MissingWindow)?;

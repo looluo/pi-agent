@@ -7,6 +7,7 @@
     "frontendDist": "../src-tauri/frontend"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Pi Agent App",

@@ -32,8 +32,20 @@ function patchAppShell(file) {
   }
   text = text.replace(
     originalTopBar,
-    '<div ref={topBarRef} data-tauri-drag-region style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)", paddingRight: 108 }}>'
+    '<div ref={topBarRef} data-tauri-drag-region onMouseDown={handleWindowDrag} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)", paddingRight: 108 }}>'
   );
+
+  const handlerMarker = "  const topBarRef = useRef<HTMLDivElement>(null);";
+  if (!text.includes(handlerMarker)) {
+    throw new Error(`Expected top bar ref marker not found in ${file}`);
+  }
+  text = text.replace(handlerMarker, `${handlerMarker}
+  const handleWindowDrag = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("button,input,textarea,select,a,[role='button']")) return;
+    void invokeTauri("window_control", { action: "drag" });
+  }, []);`);
 
   const returnMarker = "  return (\n    <>";
   if (!text.includes(returnMarker)) {
@@ -46,9 +58,8 @@ function patchAppShell(file) {
   const component = `
 
 function WindowControls() {
-  const invoke = (globalThis as typeof globalThis & { __TAURI__?: { core?: { invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown> } } }).__TAURI__?.core?.invoke;
   const run = (action: "minimize" | "maximize" | "close") => {
-    void invoke?.("window_control", { action });
+    void invokeTauri("window_control", { action });
   };
   const buttonStyle = (danger = false): React.CSSProperties => ({
     width: 36,
@@ -79,6 +90,30 @@ function WindowControls() {
       </button>
     </div>
   );
+}
+
+function invokeTauri(command: string, args?: Record<string, unknown>) {
+  const fallback = () => {
+    if (command !== "window_control") return Promise.resolve();
+    const action = typeof args?.action === "string" ? args.action : "";
+    const port = new URLSearchParams(globalThis.location.search).get("tauriControlPort");
+    if (!action || !port) {
+      console.warn("Tauri control API is not available");
+      return Promise.resolve();
+    }
+    return fetch("http://127.0.0.1:" + port + "/window?action=" + encodeURIComponent(action)).then(() => undefined).catch((error) => {
+      console.warn("Tauri control request failed", error);
+    });
+  };
+  const tauri = (globalThis as typeof globalThis & {
+    __TAURI__?: {
+      invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+      core?: { invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+    };
+  }).__TAURI__;
+  const invoke = tauri?.core?.invoke ?? tauri?.invoke;
+  if (!invoke) return fallback();
+  return invoke(command, args).catch(() => fallback());
 }
 `;
   text = `${text}\n${component}`;
