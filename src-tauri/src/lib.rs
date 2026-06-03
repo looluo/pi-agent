@@ -102,6 +102,8 @@ fn setup_app(app: tauri::AppHandle) -> Result<()> {
     wait_for_server(&url)?;
 
     let window = app.get_webview_window("main").ok_or(AppError::MissingWindow)?;
+    #[cfg(windows)]
+    window.set_decorations(false)?;
     window.navigate(Url::parse(&url)?)?;
     window.show()?;
     window.set_focus()?;
@@ -119,8 +121,8 @@ fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
     let webapp = root.join("webapp");
     fs::create_dir_all(&webapp)?;
 
-    for (relative, bytes) in EMBEDDED_WEBAPP_FILES {
-        let path = webapp.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    for (relative, bytes) in unpack_embedded_assets()? {
+        let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -128,7 +130,10 @@ fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
     }
 
     let node = root.join(if cfg!(windows) { "pi-agent-node.exe" } else { "pi-agent-node" });
-    write_if_changed(&node, EMBEDDED_NODE)?;
+    let extracted_node = root.join("node").join(if cfg!(windows) { "pi-agent-node.exe" } else { "pi-agent-node" });
+    if extracted_node != node {
+        write_if_changed(&node, &fs::read(&extracted_node)?)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -142,6 +147,47 @@ fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
         webapp,
         node,
     })
+}
+
+fn unpack_embedded_assets() -> Result<Vec<(&'static str, &'static [u8])>> {
+    let mut cursor = EMBEDDED_ASSETS;
+    if cursor.len() < 12 || &cursor[..8] != b"PIAPACK1" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid embedded asset pack").into());
+    }
+    cursor = &cursor[8..];
+    let file_count = read_u32(&mut cursor)?;
+    let mut files = Vec::with_capacity(file_count as usize);
+    for _ in 0..file_count {
+        let path_len = read_u32(&mut cursor)? as usize;
+        let data_len = read_u64(&mut cursor)? as usize;
+        if cursor.len() < path_len + data_len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated embedded asset pack").into());
+        }
+        let path = std::str::from_utf8(&cursor[..path_len])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let data = &cursor[path_len..path_len + data_len];
+        cursor = &cursor[path_len + data_len..];
+        files.push((path, data));
+    }
+    Ok(files)
+}
+
+fn read_u32(cursor: &mut &'static [u8]) -> Result<u32> {
+    if cursor.len() < 4 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u32").into());
+    }
+    let (bytes, rest) = cursor.split_at(4);
+    *cursor = rest;
+    Ok(u32::from_le_bytes(bytes.try_into().expect("slice length checked")))
+}
+
+fn read_u64(cursor: &mut &'static [u8]) -> Result<u64> {
+    if cursor.len() < 8 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u64").into());
+    }
+    let (bytes, rest) = cursor.split_at(8);
+    *cursor = rest;
+    Ok(u64::from_le_bytes(bytes.try_into().expect("slice length checked")))
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {

@@ -35,6 +35,11 @@ cpSync(source, work, {
 });
 
 replaceInFile(join(work, "app", "layout.tsx"), 'title: "Pi Agent Web"', 'title: "Pi Agent App"');
+replaceInFile(
+  join(work, "components", "AppShell.tsx"),
+  '<div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>',
+  '<div ref={topBarRef} data-tauri-drag-region style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>'
+);
 
 const nextConfig = join(work, "next.config.ts");
 replaceInFile(nextConfig, 'import { join } from "path";', 'import { join, resolve } from "path";');
