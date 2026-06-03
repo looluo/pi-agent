@@ -7,10 +7,9 @@
   "scripts": {
     "prepare:icons": "node scripts/create-icons.mjs",
     "prepare:webapp": "node scripts/build-webapp.mjs",
-    "prepare:node": "node scripts/download-node.mjs",
     "tauri": "tauri",
-    "dev": "npm run prepare:icons && npm run prepare:webapp && npm run prepare:node && tauri dev",
-    "build": "npm run prepare:icons && npm run prepare:webapp && npm run prepare:node && tauri build"
+    "dev": "npm run prepare:icons && npm run prepare:webapp && tauri dev",
+    "build": "npm run prepare:icons && npm run prepare:webapp && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

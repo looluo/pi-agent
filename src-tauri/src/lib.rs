@@ -1,7 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
-    fs,
-    io,
+    env, fs, io,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -79,9 +78,14 @@ fn stop_sidecar(app: &tauri::AppHandle) {
 fn setup_app(app: tauri::AppHandle) -> Result<()> {
     let ca_bundle = write_system_ca_bundle(&app)?;
     let assets = extract_embedded_assets(&app)?;
+    let window = app.get_webview_window("main").ok_or(AppError::MissingWindow)?;
+    let Some(node) = find_node() else {
+        show_missing_node_page(&window)?;
+        return Ok(());
+    };
     let port = portpicker::pick_unused_port().ok_or(AppError::NoPort)?;
 
-    let mut command = Command::new(&assets.node);
+    let mut command = Command::new(&node);
     command
         .arg(&assets.server)
         .current_dir(&assets.webapp)
@@ -101,7 +105,6 @@ fn setup_app(app: tauri::AppHandle) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}");
     wait_for_server(&url)?;
 
-    let window = app.get_webview_window("main").ok_or(AppError::MissingWindow)?;
     window.navigate(Url::parse(&url)?)?;
     window.show()?;
     window.set_focus()?;
@@ -109,7 +112,6 @@ fn setup_app(app: tauri::AppHandle) -> Result<()> {
 }
 
 struct ExtractedAssets {
-    node: PathBuf,
     webapp: PathBuf,
     server: PathBuf,
 }
@@ -127,23 +129,77 @@ fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
         write_if_changed(&path, bytes)?;
     }
 
-    let node = root.join(if cfg!(windows) { "pi-agent-node.exe" } else { "pi-agent-node" });
-    let extracted_node = root.join("node").join(if cfg!(windows) { "pi-agent-node.exe" } else { "pi-agent-node" });
-    if extracted_node != node {
-        write_if_changed(&node, &fs::read(&extracted_node)?)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&node)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&node, permissions)?;
-    }
-
     Ok(ExtractedAssets {
         server: webapp.join("server.js"),
         webapp,
-        node,
+    })
+}
+
+fn find_node() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = env::var("PI_AGENT_NODE") {
+        if !path.trim().is_empty() {
+            candidates.push(PathBuf::from(path));
+        }
+    }
+    candidates.push(PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" }));
+    candidates.push(PathBuf::from("node"));
+
+    candidates.into_iter().find(|candidate| node_works(candidate))
+}
+
+fn node_works(candidate: &Path) -> bool {
+    let mut command = Command::new(candidate);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.status().map(|status| status.success()).unwrap_or(false)
+}
+
+fn show_missing_node_page(window: &tauri::WebviewWindow) -> Result<()> {
+    let html = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Node.js Required</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; background: #111827; color: #e5e7eb; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { display: grid; place-items: center; }
+      main { width: min(560px, calc(100vw - 48px)); padding: 32px; border: 1px solid #374151; border-radius: 18px; background: #0f172a; box-shadow: 0 20px 80px rgba(0,0,0,.35); }
+      h1 { margin: 0 0 12px; font-size: 24px; }
+      p { margin: 0 0 14px; line-height: 1.6; color: #cbd5e1; }
+      code { color: #93c5fd; }
+      a { color: #60a5fa; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Node.js is required</h1>
+      <p>Pi Agent App did not find Node.js in your environment.</p>
+      <p>Please install Node.js 20 or newer, then restart Pi Agent App.</p>
+      <p>Recommended: Node.js LTS from <a href="https://nodejs.org/">https://nodejs.org/</a></p>
+      <p>If Node is installed in a custom location, set <code>PI_AGENT_NODE</code> to the full Node executable path.</p>
+    </main>
+  </body>
+</html>"#;
+    let url = format!("data:text/html;charset=utf-8,{}", percent_encode(html));
+    window.navigate(Url::parse(&url)?)?;
+    window.show()?;
+    window.set_focus()?;
+    Ok(())
+}
+
+fn percent_encode(input: &str) -> String {
+    input.bytes().fold(String::new(), |mut out, byte| {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+        out
     })
 }
 
