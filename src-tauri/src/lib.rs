@@ -2,16 +2,24 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
     fs,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 use tauri::{Manager, Url};
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct AppState {
-    child: Mutex<Option<CommandChild>>,
+    child: Mutex<Option<Child>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -20,8 +28,6 @@ enum AppError {
     Io(#[from] io::Error),
     #[error("tauri error: {0}")]
     Tauri(#[from] tauri::Error),
-    #[error("shell error: {0}")]
-    Shell(#[from] tauri_plugin_shell::Error),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("url error: {0}")]
@@ -38,7 +44,6 @@ type Result<T> = std::result::Result<T, AppError>;
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .manage(AppState { child: Mutex::new(None) })
         .setup(|app| {
             setup_app(app.handle().clone()).map_err(|err| {
@@ -64,7 +69,7 @@ pub fn run() {
 fn stop_sidecar(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut child) = state.child.lock() {
-            if let Some(child) = child.take() {
+            if let Some(mut child) = child.take() {
                 let _ = child.kill();
             }
         }
@@ -73,32 +78,25 @@ fn stop_sidecar(app: &tauri::AppHandle) {
 
 fn setup_app(app: tauri::AppHandle) -> Result<()> {
     let ca_bundle = write_system_ca_bundle(&app)?;
+    let assets = extract_embedded_assets(&app)?;
     let port = portpicker::pick_unused_port().ok_or(AppError::NoPort)?;
-    let server = app
-        .path()
-        .resolve("resources/webapp/server.js", tauri::path::BaseDirectory::Resource)?;
 
-    let mut command = app
-        .shell()
-        .sidecar("pi-agent-node")?
-        .args([server.to_string_lossy().to_string()])
+    let mut command = Command::new(&assets.node);
+    command
+        .arg(&assets.server)
+        .current_dir(&assets.webapp)
         .env("PORT", port.to_string())
         .env("HOSTNAME", "127.0.0.1")
         .env("NODE_EXTRA_CA_CERTS", ca_bundle.to_string_lossy().to_string())
-        .env("SSL_CERT_FILE", ca_bundle.to_string_lossy().to_string());
+        .env("SSL_CERT_FILE", ca_bundle.to_string_lossy().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
 
-    if let Some(parent) = server.parent() {
-        command = command.current_dir(parent);
-    }
-
-    let (mut rx, child) = command.spawn()?;
+    let child = command.spawn()?;
     app.state::<AppState>().child.lock().expect("state poisoned").replace(child);
-
-    thread::spawn(move || {
-        while let Some(event) = rx.blocking_recv() {
-            eprintln!("pi-agent-node: {event:?}");
-        }
-    });
 
     let url = format!("http://127.0.0.1:{port}");
     wait_for_server(&url)?;
@@ -107,6 +105,50 @@ fn setup_app(app: tauri::AppHandle) -> Result<()> {
     window.navigate(Url::parse(&url)?)?;
     window.show()?;
     window.set_focus()?;
+    Ok(())
+}
+
+struct ExtractedAssets {
+    node: PathBuf,
+    webapp: PathBuf,
+    server: PathBuf,
+}
+
+fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
+    let root = app.path().app_data_dir()?.join("standalone").join(env!("CARGO_PKG_VERSION"));
+    let webapp = root.join("webapp");
+    fs::create_dir_all(&webapp)?;
+
+    for (relative, bytes) in EMBEDDED_WEBAPP_FILES {
+        let path = webapp.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_if_changed(&path, bytes)?;
+    }
+
+    let node = root.join(if cfg!(windows) { "pi-agent-node.exe" } else { "pi-agent-node" });
+    write_if_changed(&node, EMBEDDED_NODE)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&node)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&node, permissions)?;
+    }
+
+    Ok(ExtractedAssets {
+        server: webapp.join("server.js"),
+        webapp,
+        node,
+    })
+}
+
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
+    if fs::read(path).map(|existing| existing == bytes).unwrap_or(false) {
+        return Ok(());
+    }
+    fs::write(path, bytes)?;
     Ok(())
 }
 

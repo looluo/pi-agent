@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default permissions for Pi Agent App",
   "windows": ["main"],
-  "permissions": ["core:default", "shell:allow-spawn", "shell:allow-kill"]
+  "permissions": ["core:default"]
 }

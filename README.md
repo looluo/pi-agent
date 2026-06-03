@@ -18,6 +18,8 @@ src-tauri/target/release/pi-agent.exe
 src-tauri/target/release/bundle/nsis/pi-agent_0.1.0_x64-setup.exe
 ```
 
+`src-tauri/target/release/pi-agent.exe` is a standalone executable. It can be copied and launched without the installer and without adjacent `resources/` or `pi-agent-node.exe` files.
+
 macOS output from a macOS build host:
 
 ```text
@@ -28,9 +30,10 @@ src-tauri/target/release/bundle/dmg/*.dmg
 ## Runtime Packaging
 
 - The app does not require an external Node.js installation.
-- `scripts/download-node.mjs` downloads Node.js and packages it as a Tauri sidecar.
+- `scripts/download-node.mjs` downloads Node.js for the build target.
 - `scripts/build-webapp.mjs` packages the Next.js standalone server under `src-tauri/resources/webapp`.
-- At runtime, Tauri starts the bundled Node sidecar with `resources/webapp/server.js` on a random localhost port and opens the desktop window to that URL.
+- `src-tauri/build.rs` embeds Node.js and the Next.js standalone server into the Tauri executable.
+- At runtime, Tauri extracts the embedded assets into the app data directory, starts the extracted Node runtime with `webapp/server.js` on a random localhost port, and opens the desktop window to that URL.
 
 ## Corporate CA Certificates
 
