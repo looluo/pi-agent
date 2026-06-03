@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-build/
+src-tauri/target/
+src-tauri/binaries/pi-agent-node*
+src-tauri/resources/webapp/
+src-tauri/resources/metadata.json
+*.log
+.DS_Store
