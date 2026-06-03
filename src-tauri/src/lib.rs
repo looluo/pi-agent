@@ -45,6 +45,7 @@ type Result<T> = std::result::Result<T, AppError>;
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState { child: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![window_control])
         .setup(|app| {
             setup_app(app.handle().clone()).map_err(|err| {
                 eprintln!("failed to start Pi Agent App: {err}");
@@ -64,6 +65,22 @@ pub fn run() {
                 stop_sidecar(app);
             }
         });
+}
+
+#[tauri::command]
+fn window_control(window: tauri::Window, action: String) -> std::result::Result<(), String> {
+    match action.as_str() {
+        "minimize" => window.minimize().map_err(|err| err.to_string()),
+        "maximize" => {
+            if window.is_maximized().map_err(|err| err.to_string())? {
+                window.unmaximize().map_err(|err| err.to_string())
+            } else {
+                window.maximize().map_err(|err| err.to_string())
+            }
+        }
+        "close" => window.close().map_err(|err| err.to_string()),
+        _ => Err(format!("unknown window action: {action}")),
+    }
 }
 
 fn stop_sidecar(app: &tauri::AppHandle) {
