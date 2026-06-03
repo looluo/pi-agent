@@ -7,7 +7,7 @@ edition = "2021"
 
 [lib]
 name = "pi_agent_lib"
-crate-type = ["rlib"]
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
 name = "pi-agent"
@@ -25,10 +25,3 @@ serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 thiserror = "2"
 url = "2"
-
-[profile.release]
-opt-level = 0
-debug = false
-strip = true
-lto = false
-codegen-units = 16

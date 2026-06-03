@@ -34,7 +34,6 @@ src-tauri/target/release/bundle/dmg/*.dmg
 - `scripts/build-webapp.mjs` packages the Next.js standalone server under `src-tauri/resources/webapp`.
 - `src-tauri/build.rs` embeds Node.js and the Next.js standalone server into the Tauri executable.
 - At runtime, Tauri extracts the embedded assets into the app data directory, starts the extracted Node runtime with `webapp/server.js` on a random localhost port, and opens the desktop window to that URL.
-- On Windows, the native title bar is hidden. The app top bar is marked as a Tauri drag region during the build step.
 
 ## Corporate CA Certificates
 

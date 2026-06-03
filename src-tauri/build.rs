@@ -31,29 +31,17 @@ fn generate_embedded_assets() -> io::Result<()> {
     }
     files.sort();
 
-    let pack_path = out_dir.join("embedded_assets.pack");
-    let mut pack = File::create(&pack_path)?;
-    pack.write_all(b"PIAPACK1")?;
-    let file_count = files.len() as u32 + 1;
-    pack.write_all(&file_count.to_le_bytes())?;
-    write_packed_file(&mut pack, if target_triple.contains("windows") { "node/pi-agent-node.exe" } else { "node/pi-agent-node" }, &node_path)?;
-    for (relative, absolute) in files {
-        write_packed_file(&mut pack, &format!("webapp/{relative}"), Path::new(&absolute))?;
-    }
-
     let output_path = out_dir.join("embedded_assets.rs");
     let mut output = File::create(output_path)?;
-    writeln!(output, "pub const EMBEDDED_ASSETS: &[u8] = include_bytes!({:?}) as &[u8];", pack_path)?;
-    Ok(())
-}
-
-fn write_packed_file(pack: &mut File, relative: &str, path: &Path) -> io::Result<()> {
-    let bytes = fs::read(path)?;
-    let relative = relative.as_bytes();
-    pack.write_all(&(relative.len() as u32).to_le_bytes())?;
-    pack.write_all(&(bytes.len() as u64).to_le_bytes())?;
-    pack.write_all(relative)?;
-    pack.write_all(&bytes)?;
+    writeln!(output, "pub const EMBEDDED_WEBAPP_FILES: &[(&str, &[u8])] = &[")?;
+    for (relative, absolute) in files {
+        writeln!(
+            output,
+            "    ({relative:?}, include_bytes!({absolute:?}) as &[u8]),"
+        )?;
+    }
+    writeln!(output, "];")?;
+    writeln!(output, "pub const EMBEDDED_NODE: &[u8] = include_bytes!({:?}) as &[u8];", node_path)?;
     Ok(())
 }
 
