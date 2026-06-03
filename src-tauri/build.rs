@@ -5,8 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use flate2::{write::ZlibEncoder, Compression};
-
 fn main() {
     generate_embedded_assets().expect("failed to generate embedded asset manifest");
     tauri_build::build()
@@ -27,14 +25,12 @@ fn generate_embedded_assets() -> io::Result<()> {
     let asset_id = compute_asset_id(&files)?;
 
     let pack_path = out_dir.join("embedded_assets.pack");
-    let pack_file = File::create(&pack_path)?;
-    let mut pack = ZlibEncoder::new(pack_file, Compression::best());
+    let mut pack = File::create(&pack_path)?;
     pack.write_all(b"PIAPACK1")?;
     pack.write_all(&(files.len() as u32).to_le_bytes())?;
     for (relative, absolute) in files {
         write_packed_file(&mut pack, &format!("webapp/{relative}"), Path::new(&absolute))?;
     }
-    pack.finish()?;
 
     let output_path = out_dir.join("embedded_assets.rs");
     let mut output = File::create(output_path)?;
@@ -61,7 +57,7 @@ fn update_hash(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-fn write_packed_file(pack: &mut impl Write, relative: &str, path: &Path) -> io::Result<()> {
+fn write_packed_file(pack: &mut File, relative: &str, path: &Path) -> io::Result<()> {
     let bytes = fs::read(path)?;
     let relative = relative.as_bytes();
     pack.write_all(&(relative.len() as u32).to_le_bytes())?;
