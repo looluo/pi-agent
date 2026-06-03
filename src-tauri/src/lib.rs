@@ -49,17 +49,26 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                if let Some(state) = window.try_state::<AppState>() {
-                    if let Ok(mut child) = state.child.lock() {
-                        if let Some(child) = child.take() {
-                            let _ = child.kill();
-                        }
-                    }
-                }
+                stop_sidecar(window.app_handle());
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Pi Agent App");
+        .build(tauri::generate_context!())
+        .expect("error while building Pi Agent App")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                stop_sidecar(app);
+            }
+        });
+}
+
+fn stop_sidecar(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut child) = state.child.lock() {
+            if let Some(child) = child.take() {
+                let _ = child.kill();
+            }
+        }
+    }
 }
 
 fn setup_app(app: tauri::AppHandle) -> Result<()> {
