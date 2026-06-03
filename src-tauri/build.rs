@@ -22,6 +22,7 @@ fn generate_embedded_assets() -> io::Result<()> {
         collect_files(&webapp_dir, &webapp_dir, &mut files)?;
     }
     files.sort();
+    let asset_id = compute_asset_id(&files)?;
 
     let pack_path = out_dir.join("embedded_assets.pack");
     let mut pack = File::create(&pack_path)?;
@@ -33,8 +34,27 @@ fn generate_embedded_assets() -> io::Result<()> {
 
     let output_path = out_dir.join("embedded_assets.rs");
     let mut output = File::create(output_path)?;
+    writeln!(output, "pub const EMBEDDED_ASSET_ID: &str = {:?};", asset_id)?;
     writeln!(output, "pub const EMBEDDED_ASSETS: &[u8] = include_bytes!({:?}) as &[u8];", pack_path)?;
     Ok(())
+}
+
+fn compute_asset_id(files: &[(String, String)]) -> io::Result<String> {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for (relative, absolute) in files {
+        update_hash(&mut hash, relative.as_bytes());
+        update_hash(&mut hash, b"\0");
+        update_hash(&mut hash, &fs::read(absolute)?);
+        update_hash(&mut hash, b"\0");
+    }
+    Ok(format!("{hash:016x}"))
+}
+
+fn update_hash(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
 }
 
 fn write_packed_file(pack: &mut File, relative: &str, path: &Path) -> io::Result<()> {

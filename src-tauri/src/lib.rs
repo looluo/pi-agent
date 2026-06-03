@@ -117,8 +117,16 @@ struct ExtractedAssets {
 }
 
 fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
-    let root = app.path().app_data_dir()?.join("standalone").join(env!("CARGO_PKG_VERSION"));
+    let standalone_root = app.path().app_data_dir()?.join("standalone");
+    let cache_name = format!("{}-{}", env!("CARGO_PKG_VERSION"), EMBEDDED_ASSET_ID);
+    let root = standalone_root.join(&cache_name);
     let webapp = root.join("webapp");
+    let server = webapp.join("server.js");
+    if cache_ready(&root, &server) {
+        cleanup_old_asset_caches(&standalone_root, &cache_name);
+        return Ok(ExtractedAssets { server, webapp });
+    }
+
     fs::create_dir_all(&webapp)?;
 
     for (relative, bytes) in unpack_embedded_assets()? {
@@ -129,10 +137,35 @@ fn extract_embedded_assets(app: &tauri::AppHandle) -> Result<ExtractedAssets> {
         write_if_changed(&path, bytes)?;
     }
 
+    fs::write(root.join(".complete"), EMBEDDED_ASSET_ID)?;
+    cleanup_old_asset_caches(&standalone_root, &cache_name);
+
     Ok(ExtractedAssets {
-        server: webapp.join("server.js"),
+        server,
         webapp,
     })
+}
+
+fn cache_ready(root: &Path, server: &Path) -> bool {
+    server.is_file()
+        && fs::read_to_string(root.join(".complete"))
+            .map(|value| value == EMBEDDED_ASSET_ID)
+            .unwrap_or(false)
+}
+
+fn cleanup_old_asset_caches(standalone_root: &Path, current: &str) {
+    let Ok(entries) = fs::read_dir(standalone_root) else { return; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy() == current {
+            continue;
+        }
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 fn find_node() -> Option<PathBuf> {

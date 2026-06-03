@@ -34,7 +34,8 @@ src-tauri/target/release/bundle/dmg/*.dmg
 - Set `PI_AGENT_NODE` to a full Node executable path when Node.js is installed in a custom location.
 - `scripts/build-webapp.mjs` packages the Next.js standalone server under `src-tauri/resources/webapp`.
 - `src-tauri/build.rs` embeds the Next.js standalone server into the Tauri executable.
-- At runtime, Tauri extracts the embedded web assets into the app data directory, starts system Node.js with `webapp/server.js` on a random localhost port, and opens the desktop window to that URL.
+- At runtime, Tauri extracts the embedded web assets into the app data directory on first launch or after the embedded assets change. Later launches reuse the cached `standalone/<version>-<asset-id>/webapp` directory and skip extraction.
+- Tauri starts system Node.js with `webapp/server.js` on a random localhost port and opens the desktop window to that URL.
 
 ## Corporate CA Certificates
 
