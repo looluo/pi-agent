@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{Manager, Url};
+use tauri_plugin_dialog::DialogExt;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -43,7 +44,9 @@ type Result<T> = std::result::Result<T, AppError>;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState { child: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![select_directory])
         .setup(|app| {
             setup_app(app.handle().clone()).map_err(|err| {
                 eprintln!("failed to start Pi Agent App: {err}");
@@ -63,6 +66,17 @@ pub fn run() {
                 stop_sidecar(app);
             }
         });
+}
+
+#[tauri::command]
+async fn select_directory(app: tauri::AppHandle) -> std::result::Result<Option<String>, String> {
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("Select working directory")
+        .blocking_pick_folder();
+
+    Ok(selection.map(|path| path.to_string()))
 }
 
 fn stop_sidecar(app: &tauri::AppHandle) {

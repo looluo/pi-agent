@@ -23,6 +23,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 thiserror = "2"
 url = "2"
 
