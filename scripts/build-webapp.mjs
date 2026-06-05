@@ -25,6 +25,13 @@ function replaceInFile(file, search, replacement) {
   writeFileSync(file, text.replace(search, replacement));
 }
 
+function applyPatch(file) {
+  run("git", ["apply", "--whitespace=nowarn", file], {
+    cwd: work,
+    env: { ...process.env, GIT_CEILING_DIRECTORIES: root },
+  });
+}
+
 function patchSessionSidebar(file) {
   let text = readFileSync(file, "utf8");
 
@@ -158,6 +165,7 @@ cpSync(source, work, {
 
 replaceInFile(join(work, "app", "layout.tsx"), 'title: "Pi Agent Web"', 'title: "Pi Agent App"');
 patchSessionSidebar(join(work, "components", "SessionSidebar.tsx"));
+applyPatch(join(root, "patches", "pi-web", "auto-session-title.patch"));
 
 const nextConfig = join(work, "next.config.ts");
 replaceInFile(nextConfig, 'import { join } from "path";', 'import { join, resolve } from "path";');

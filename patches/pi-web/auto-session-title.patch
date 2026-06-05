@@ -1,0 +1,253 @@
+diff --git a/app/api/sessions/[id]/generate-title/route.ts b/app/api/sessions/[id]/generate-title/route.ts
+new file mode 100644
+index 0000000..9b046f0
+--- /dev/null
++++ b/app/api/sessions/[id]/generate-title/route.ts
+@@ -0,0 +1,139 @@
++import { NextResponse } from "next/server";
++import { SessionManager, AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
++import { completeSimple } from "@earendil-works/pi-ai";
++import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
++
++const TITLE_PROMPT = `Summarize the following conversation in 3-8 words. Output ONLY the summary title, nothing else. No quotes, no punctuation at the end. Use the same language as the conversation.`;
++
++export async function POST(
++  req: Request,
++  { params }: { params: Promise<{ id: string }> }
++) {
++  const { id } = await params;
++  try {
++    const filePath = await resolveSessionPath(id);
++    if (!filePath) {
++      return NextResponse.json({ error: "Session not found" }, { status: 404 });
++    }
++
++    const sm = SessionManager.open(filePath);
++
++    // Do not regenerate if the session already has a custom name.
++    const existingName = sm.getSessionName();
++    if (existingName) {
++      return NextResponse.json({ title: existingName, skipped: true });
++    }
++
++    const entries = sm.getEntries() as never;
++    const leafId = sm.getLeafId();
++    const context = buildSessionContext(entries, leafId);
++
++    // Need at least one user message and one assistant response.
++    if (!context.messages.some((m) => m.role === "user") || !context.messages.some((m) => m.role === "assistant")) {
++      return NextResponse.json({ error: "Not enough messages to generate title" }, { status: 400 });
++    }
++
++    const conversationText = context.messages
++      .filter((m) => m.role === "user" || m.role === "assistant")
++      .map((m) => {
++        const content = m.content;
++        if (typeof content === "string") {
++          return `${m.role === "user" ? "User" : "Assistant"}: ${content}`;
++        }
++        if (Array.isArray(content)) {
++          const textParts = content
++            .map((b) => b.type === "text" && "text" in b && typeof b.text === "string" ? b.text : "")
++            .filter(Boolean)
++            .join("\n");
++          return `${m.role === "user" ? "User" : "Assistant"}: ${textParts}`;
++        }
++        return "";
++      })
++      .filter(Boolean)
++      .join("\n\n");
++
++    const MAX_CHARS = 3000;
++    const truncated = conversationText.length > MAX_CHARS
++      ? conversationText.slice(0, MAX_CHARS) + "\n\n[... conversation truncated]"
++      : conversationText;
++
++    const authStorage = AuthStorage.create();
++    const registry = ModelRegistry.create(authStorage);
++    const available = registry.getAvailable();
++
++    if (available.length === 0) {
++      return NextResponse.json({ error: "No models available" }, { status: 400 });
++    }
++
++    let model = context.model
++      ? registry.find(context.model.provider, context.model.modelId)
++      : undefined;
++
++    if (!model) {
++      model = available[0];
++    }
++
++    const auth = await registry.getApiKeyAndHeaders(model);
++    if (!auth.ok) {
++      return NextResponse.json({ error: auth.error }, { status: 400 });
++    }
++
++    const result = await completeSimple(
++      model as never,
++      {
++        systemPrompt: TITLE_PROMPT,
++        messages: [
++          {
++            role: "user" as const,
++            content: truncated,
++            timestamp: Date.now(),
++          },
++        ],
++      },
++      {
++        maxTokens: 60,
++        temperature: 0.3,
++        apiKey: auth.apiKey,
++        ...(auth.headers ? { headers: auth.headers } : {}),
++      }
++    );
++
++    if (result.stopReason === "error" || result.stopReason === "aborted") {
++      return NextResponse.json(
++        { error: result.errorMessage ?? "LLM call failed" },
++        { status: 500 }
++      );
++    }
++
++    let title = "";
++    if (result.content && Array.isArray(result.content)) {
++      const textParts = result.content
++        .map((b) => b.type === "text" && "text" in b && typeof b.text === "string" ? b.text : "")
++        .filter(Boolean);
++      title = textParts.join("").trim();
++    }
++
++    if (!title) {
++      return NextResponse.json({ error: "Failed to generate title" }, { status: 500 });
++    }
++
++    title = title
++      .replace(/^["'`]+|["'`]+$/g, "")
++      .replace(/[.!?]+$/, "")
++      .trim()
++      .slice(0, 80);
++
++    if (!title) {
++      return NextResponse.json({ error: "Generated empty title" }, { status: 500 });
++    }
++
++    sm.appendSessionInfo(title);
++
++    return NextResponse.json({ title, skipped: false });
++  } catch (error) {
++    return NextResponse.json(
++      { error: String(error) },
++      { status: 500 }
++    );
++  }
++}
+diff --git a/components/AppShell.tsx b/components/AppShell.tsx
+index e123cdf..a419c3f 100644
+--- a/components/AppShell.tsx
++++ b/components/AppShell.tsx
+@@ -165,6 +165,16 @@ export function AppShell() {
+     setExplorerRefreshKey((k) => k + 1);
+   }, []);
+ 
++  const handleTitleGenerated = useCallback((sessionId: string, title: string) => {
++    setRefreshKey((k) => k + 1);
++    setSelectedSession((prev) => {
++      if (prev?.id === sessionId) {
++        return { ...prev, name: title };
++      }
++      return prev;
++    });
++  }, []);
++
+   const handleSessionForked = useCallback((newSessionId: string) => {
+     setRefreshKey((k) => k + 1);
+     setSessionKey((k) => k + 1);
+@@ -566,6 +576,7 @@ export function AppShell() {
+               onSystemPromptChange={handleSystemPromptChange}
+               onSessionStatsChange={handleSessionStatsChange}
+               onContextUsageChange={handleContextUsageChange}
++              onTitleGenerated={handleTitleGenerated}
+             />
+           ) : showPlaceholder ? (
+             activeCwd ? (
+diff --git a/components/ChatWindow.tsx b/components/ChatWindow.tsx
+index 6fc4224..ad9ee75 100644
+--- a/components/ChatWindow.tsx
++++ b/components/ChatWindow.tsx
+@@ -21,6 +21,7 @@ interface Props {
+   onSystemPromptChange?: (prompt: string | null) => void;
+   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
+   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
++  onTitleGenerated?: (sessionId: string, title: string) => void;
+ }
+ 
+ function phaseLabel(phase: AgentPhase): string {
+@@ -90,7 +91,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
+   );
+ }
+ 
+-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
++export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onTitleGenerated }: Props) {
+   const {
+     loading, error, messages, entryIds, streamState,
+     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+@@ -105,7 +106,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
+     handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
+   } = useAgentSession({
+     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
++    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onTitleGenerated,
+   });
+ 
+   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
+diff --git a/hooks/useAgentSession.ts b/hooks/useAgentSession.ts
+index fa7181d..d3348e2 100644
+--- a/hooks/useAgentSession.ts
++++ b/hooks/useAgentSession.ts
+@@ -66,6 +66,7 @@ export interface UseAgentSessionOptions {
+   onSystemPromptChange?: (prompt: string | null) => void;
+   setNewSessionModel?: (model: { provider: string; modelId: string } | null) => void;
+   setToolPreset?: (preset: "none" | "default" | "full") => void;
++  onTitleGenerated?: (sessionId: string, title: string) => void;
+ }
+ 
+ export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+@@ -85,7 +86,7 @@ export interface AttachedImage {
+ export function useAgentSession(opts: UseAgentSessionOptions) {
+   const {
+     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
++    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onTitleGenerated,
+   } = opts;
+ 
+   const isNew = session === null && newSessionCwd !== null;
+@@ -263,6 +264,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
+               if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
+             })
+             .catch(() => {});
++          const currentSessionId = sessionIdRef.current;
++          const sessionHasName = !!session?.name;
++          if (!sessionHasName) {
++            fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/generate-title`, { method: "POST" })
++              .then((r) => r.json())
++              .then((data: { title?: string; skipped?: boolean; error?: string }) => {
++                if (data.title && !data.skipped) {
++                  onTitleGenerated?.(currentSessionId, data.title);
++                }
++              })
++              .catch(() => {});
++          }
+         }
+         onAgentEnd?.();
+         break;
+@@ -325,7 +338,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
+         }
+         break;
+     }
+-  }, [loadSession, onAgentEnd]);
++  }, [loadSession, onAgentEnd, onTitleGenerated, session?.name]);
+   handleAgentEventRef.current = handleAgentEvent;
+ 
+   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
