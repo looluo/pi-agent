@@ -1,6 +1,6 @@
 [package]
 name = "pi-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pi Agent desktop app"
 authors = ["Pi Agent"]
 edition = "2021"

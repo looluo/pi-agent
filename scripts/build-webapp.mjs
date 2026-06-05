@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "pi-web");
 const work = join(root, "dist-build", `pi-web-${process.pid}-${Date.now()}`);
+const safeHome = join(work, ".home");
 const resources = join(root, "src-tauri", "resources");
 const webapp = join(resources, "webapp");
 
@@ -28,6 +29,7 @@ rmSync(work, { recursive: true, force: true });
 rmSync(webapp, { recursive: true, force: true });
 mkdirSync(dirname(work), { recursive: true });
 mkdirSync(resources, { recursive: true });
+mkdirSync(safeHome, { recursive: true });
 
 cpSync(source, work, {
   recursive: true,
@@ -49,6 +51,8 @@ run("npm", ["run", "build"], {
   cwd: work,
   env: {
     ...process.env,
+    HOME: safeHome,
+    USERPROFILE: safeHome,
     NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=4096 --max-semi-space-size=256"].filter(Boolean).join(" "),
     NEXT_PRIVATE_BUILD_WORKER: "1",
   },
