@@ -7,7 +7,11 @@ use std::{
 
 fn main() {
     generate_embedded_assets().expect("failed to generate embedded asset manifest");
-    tauri_build::build()
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(&["select_directory"])),
+    )
+    .expect("failed to build Tauri app")
 }
 
 fn generate_embedded_assets() -> io::Result<()> {

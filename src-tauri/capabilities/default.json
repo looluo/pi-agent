@@ -3,5 +3,8 @@
   "identifier": "default",
   "description": "Default permissions for Pi Agent App",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": ["core:default", "dialog:allow-open", "allow-select-directory"]
 }
