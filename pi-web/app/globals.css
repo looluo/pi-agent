@@ -130,8 +130,12 @@ pre, code {
 .markdown-body ul, .markdown-body ol {
   padding-left: 20px;
   margin: 4px 0 8px;
+  list-style-position: outside;
 }
 .markdown-body li { margin: 2px 0; }
+.markdown-body ul > li { list-style-type: disc; }
+.markdown-body ol > li { list-style-type: decimal; }
+.markdown-body li > p { margin: 0; }
 .markdown-body a { color: var(--accent); text-decoration: underline; }
 .markdown-body blockquote {
   border-left: 3px solid var(--border);
@@ -152,6 +156,18 @@ pre, code {
 }
 .markdown-body th { background: var(--bg-panel); font-weight: 600; }
 .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.markdown-body .katex-display {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+.markdown-body .katex {
+  font-size: 1.05em;
+}
+.markdown-user-message p {
+  white-space: pre-wrap;
+}
 
 .mermaid-block {
   padding: 12px;
