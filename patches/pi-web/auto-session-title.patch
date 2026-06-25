@@ -206,27 +206,12 @@ diff --git a/hooks/useAgentSession.ts b/hooks/useAgentSession.ts
 index fa7181d..d3348e2 100644
 --- a/hooks/useAgentSession.ts
 +++ b/hooks/useAgentSession.ts
-@@ -66,6 +66,7 @@ export interface UseAgentSessionOptions {
-   onSystemPromptChange?: (prompt: string | null) => void;
-   setNewSessionModel?: (model: { provider: string; modelId: string } | null) => void;
-   setToolPreset?: (preset: "none" | "default" | "full") => void;
+@@ -78,0 +79 @@ export interface UseAgentSessionOptions {
 +  onTitleGenerated?: (sessionId: string, title: string) => void;
- }
- 
- export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-@@ -85,7 +86,7 @@ export interface AttachedImage {
- export function useAgentSession(opts: UseAgentSessionOptions) {
-   const {
-     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+@@ -119 +120 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 -    modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
 +    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onTitleGenerated,
-   } = opts;
- 
-   const isNew = session === null && newSessionCwd !== null;
-@@ -263,6 +264,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
-               if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
-             })
-             .catch(() => {});
+@@ -302,0 +304,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 +          const currentSessionId = sessionIdRef.current;
 +          const sessionHasName = !!session?.name;
 +          if (!sessionHasName) {
@@ -239,15 +224,6 @@ index fa7181d..d3348e2 100644
 +              })
 +              .catch(() => {});
 +          }
-         }
-         onAgentEnd?.();
-         break;
-@@ -325,7 +338,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
-         }
-         break;
-     }
+@@ -371 +385 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 -  }, [loadSession, onAgentEnd]);
 +  }, [loadSession, onAgentEnd, onTitleGenerated, session?.name]);
-   handleAgentEventRef.current = handleAgentEvent;
- 
-   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {

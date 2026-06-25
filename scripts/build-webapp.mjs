@@ -26,7 +26,7 @@ function replaceInFile(file, search, replacement) {
 }
 
 function applyPatch(file) {
-  run("git", ["apply", "--whitespace=nowarn", file], {
+  run("git", ["apply", "--unidiff-zero", "--whitespace=nowarn", file], {
     cwd: work,
     env: { ...process.env, GIT_CEILING_DIRECTORIES: root },
   });
