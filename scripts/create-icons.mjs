@@ -40,13 +40,17 @@ function makePng(size) {
       const dy = y - center;
       const dist = Math.sqrt(dx * dx + dy * dy);
       const inside = dist <= radius;
-      const letter =
-        x > size * 0.31 && x < size * 0.45 && y > size * 0.28 && y < size * 0.72 ||
-        x > size * 0.43 && x < size * 0.66 && y > size * 0.28 && y < size * 0.42 ||
-        x > size * 0.43 && x < size * 0.64 && y > size * 0.45 && y < size * 0.58;
-      row[offset] = letter ? 255 : inside ? 67 : 0;
-      row[offset + 1] = letter ? 255 : inside ? 119 : 0;
-      row[offset + 2] = letter ? 255 : inside ? 255 : 0;
+      const nx = x / size;
+      const ny = y / size;
+      const piSymbol =
+        nx > 0.25 && nx < 0.75 && ny > 0.28 && ny < 0.40 ||
+        nx > 0.33 && nx < 0.45 && ny > 0.36 && ny < 0.72 ||
+        nx > 0.55 && nx < 0.67 && ny > 0.36 && ny < 0.72 ||
+        nx > 0.28 && nx < 0.47 && ny > 0.25 && ny < 0.33 ||
+        nx > 0.53 && nx < 0.72 && ny > 0.25 && ny < 0.33;
+      row[offset] = piSymbol ? 255 : inside ? 67 : 0;
+      row[offset + 1] = piSymbol ? 255 : inside ? 119 : 0;
+      row[offset + 2] = piSymbol ? 255 : inside ? 255 : 0;
       row[offset + 3] = inside ? 255 : 0;
     }
     rows.push(row);
