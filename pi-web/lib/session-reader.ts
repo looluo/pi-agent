@@ -1,23 +1,29 @@
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionInfo, SessionContext, SessionTreeNode, AssistantMessage } from "./types";
+import type { AgentMessage, SessionEntry, SessionInfo, SessionContext, AssistantMessage } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
+import { resolveProject, type ProjectInfo } from "./worktree";
 
 export { getAgentDir };
-
-export function getSessionsDir(): string {
-  return `${getAgentDir()}/sessions`;
-}
 
 export async function listAllSessions(): Promise<SessionInfo[]> {
   const piSessions: PiSessionInfo[] = await SessionManager.listAll();
   const pathToId = new Map<string, string>();
   for (const s of piSessions) pathToId.set(s.path, s.id);
 
+  // Resolve each unique cwd to its project root (main repo shared by all
+  // worktrees). resolveProject caches per-cwd, so this is cheap after warmup.
+  const uniqueCwds = [...new Set(piSessions.map((s) => s.cwd).filter(Boolean))];
+  const projectByCwd = new Map<string, ProjectInfo>();
+  await Promise.all(uniqueCwds.map(async (cwd) => {
+    projectByCwd.set(cwd, await resolveProject(cwd));
+  }));
+
   const cache = getPathCache();
   return piSessions.map((s) => {
     // Populate path cache so resolveSessionPath works without a full scan
     cache.set(s.id, s.path);
+    const project = s.cwd ? projectByCwd.get(s.cwd) : undefined;
     return {
       path: s.path,
       id: s.id,
@@ -28,6 +34,8 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined,
+      projectRoot: project?.projectRoot ?? s.cwd,
+      ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
     };
   });
 }
@@ -60,47 +68,6 @@ export function cacheSessionPath(sessionId: string, filePath: string): void {
 
 export function invalidateSessionPathCache(sessionId: string): void {
   getPathCache().delete(sessionId);
-}
-
-export function getSessionEntries(filePath: string): SessionEntry[] {
-  const entries = SessionManager.open(filePath).getEntries();
-  return entries as unknown as SessionEntry[];
-}
-
-export function buildTree(entries: SessionEntry[]): SessionTreeNode[] {
-  const nodeMap = new Map<string, SessionTreeNode>();
-  const labelsById = new Map<string, string>();
-
-  for (const entry of entries) {
-    if (entry.type === "label") {
-      const l = entry as { type: "label"; targetId: string; label?: string };
-      if (l.label) labelsById.set(l.targetId, l.label);
-      else labelsById.delete(l.targetId);
-    }
-  }
-
-  const roots: SessionTreeNode[] = [];
-  for (const entry of entries) {
-    nodeMap.set(entry.id, { entry, children: [], label: labelsById.get(entry.id) });
-  }
-  for (const entry of entries) {
-    const node = nodeMap.get(entry.id)!;
-    if (!entry.parentId) {
-      roots.push(node);
-    } else {
-      const parent = nodeMap.get(entry.parentId);
-      if (parent) parent.children.push(node);
-      else roots.push(node);
-    }
-  }
-
-  const stack = [...roots];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    node.children.sort((a, b) => new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime());
-    stack.push(...node.children);
-  }
-  return roots;
 }
 
 export function buildSessionContext(entries: SessionEntry[], leafId?: string | null): SessionContext {
@@ -140,30 +107,30 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     }
   }
 
-  const entryIds: string[] = [];
+  const contextEntryIds: string[] = [];
   if (compactionId) {
     // The first message in piCtx.messages is the synthetic compaction summary — map to compaction entry id
-    entryIds.push(compactionId);
+    contextEntryIds.push(compactionId);
     const compactionIdx = path.findIndex((e) => e.id === compactionId);
     const firstKeptIdx = firstKeptEntryId
       ? path.findIndex((e, i) => i < compactionIdx && e.id === firstKeptEntryId)
       : -1;
     const startIdx = firstKeptIdx >= 0 ? firstKeptIdx : compactionIdx;
     for (let i = startIdx; i < compactionIdx; i++) {
-      if (path[i].type === "message") entryIds.push(path[i].id);
+      if (isContextMessageEntry(path[i])) contextEntryIds.push(path[i].id);
     }
     for (let i = compactionIdx + 1; i < path.length; i++) {
-      if (path[i].type === "message") entryIds.push(path[i].id);
+      if (isContextMessageEntry(path[i])) contextEntryIds.push(path[i].id);
     }
   } else {
     for (const e of path) {
-      if (e.type === "message") entryIds.push(e.id);
+      if (isContextMessageEntry(e)) contextEntryIds.push(e.id);
     }
   }
 
   // pi injects compaction summary as {role:"compactionSummary", summary, tokensBefore}.
   // Convert to {role:"user"} so MessageView can render it the same as before.
-  const messages = (piCtx.messages as AssistantMessage[]).map((msg) => {
+  const contextMessages = (piCtx.messages as AssistantMessage[]).map((msg) => {
     const raw = msg as unknown as Record<string, unknown>;
     if (raw.role === "compactionSummary") {
       return {
@@ -172,21 +139,43 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
         timestamp: raw.timestamp as number | undefined,
       };
     }
+    if (raw.role === "branchSummary") {
+      return {
+        role: "user" as const,
+        content: `*The conversation briefly explored another branch and returned with this summary:*\n\n${raw.summary ?? ""}`,
+        timestamp: raw.timestamp as number | undefined,
+      };
+    }
     return normalizeToolCalls(msg);
   });
 
+  const display = filterDisplayMessages(contextMessages, contextEntryIds);
+
   return {
-    messages,
-    entryIds,
+    messages: display.messages,
+    entryIds: display.entryIds,
     thinkingLevel: piCtx.thinkingLevel,
     model: piCtx.model,
   };
 }
 
-export function getLeafId(entries: SessionEntry[]): string | null {
-  if (entries.length === 0) return null;
-  return entries[entries.length - 1].id;
+function isContextMessageEntry(entry: SessionEntry): boolean {
+  return entry.type === "message" || entry.type === "custom_message" || (entry.type === "branch_summary" && !!entry.summary);
 }
 
+function filterDisplayMessages(messages: AgentMessage[], entryIds: string[]): Pick<SessionContext, "messages" | "entryIds"> {
+  const displayMessages: AgentMessage[] = [];
+  const displayEntryIds: string[] = [];
 
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
 
+    displayMessages.push(msg);
+    displayEntryIds.push(entryIds[i] ?? "");
+  }
+
+  return {
+    messages: displayMessages,
+    entryIds: displayEntryIds,
+  };
+}
