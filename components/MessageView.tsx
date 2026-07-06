@@ -6,6 +6,7 @@ import type {
   AgentMessage,
   UserMessage,
   AssistantMessage,
+  CustomMessage,
   ToolResultMessage,
   AssistantContentBlock,
   TextContent,
@@ -71,6 +72,9 @@ export function MessageView({ message, isStreaming, toolResults, modelNames, ent
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
     return null;
+  }
+  if (message.role === "custom") {
+    return <CustomMessageView message={message as CustomMessage} />;
   }
   return null;
 }
@@ -422,7 +426,7 @@ function AssistantMessageView({
             <>
 
               {est > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title="预估 token 数（流式接收中）">
+                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title="Estimated token count while streaming">
                   <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
                     <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
@@ -574,6 +578,8 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
 function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
   const [expanded, setExpanded] = useState(false);
   const inputStr = JSON.stringify(block.input, null, 2);
+  const isEditTool = isEditToolName(block.toolName);
+  const resultDiff = result && !result.isError ? getResultDiff(result) : null;
 
   // Result display
   const resultText = result
@@ -625,7 +631,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
       </button>
 
       {/* ── Expanded: input args ── */}
-      {expanded && (
+      {expanded && !isEditTool && (
         <pre
           style={{
             margin: 0,
@@ -646,14 +652,383 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
 
       {/* ── Paired result — only shown when expanded ── */}
       {expanded && result && (
-        <PairedResult
-          text={resultText ?? ""}
-          isEmpty={resultIsEmpty}
-          isError={isError}
-        />
+        resultDiff ? (
+          <PairedDiffResult
+            diff={resultDiff}
+          />
+        ) : (
+          <PairedResult
+            text={resultText ?? ""}
+            isEmpty={resultIsEmpty}
+            isError={isError}
+          />
+        )
       )}
     </div>
   );
+}
+
+interface ResultDiff {
+  text: string;
+}
+
+type SplitDiffCellType = "context" | "removed" | "added" | "empty";
+
+interface SplitDiffCell {
+  lineNo: number | null;
+  text: string;
+  type: SplitDiffCellType;
+}
+
+type SplitDiffRow =
+  | { type: "hunk"; text: string }
+  | { type: "line"; left: SplitDiffCell; right: SplitDiffCell };
+
+interface SplitDiffFile {
+  oldPath?: string;
+  newPath?: string;
+  rows: SplitDiffRow[];
+}
+
+interface PendingChangeLine {
+  lineNo: number;
+  text: string;
+}
+
+function PairedDiffResult({ diff }: {
+  diff: ResultDiff;
+}) {
+  return (
+    <div
+      style={{
+        borderTop: "1px solid rgba(34,197,94,0.15)",
+        background: "var(--bg)",
+      }}
+    >
+      <SplitPatchView text={diff.text} />
+    </div>
+  );
+}
+
+function SplitPatchView({ text }: { text: string }) {
+  const files = useMemo(() => parseUnifiedPatch(text), [text]);
+  if (!files) return <PatchTextView text={text} />;
+  const showFileHeaders = files.length > 1;
+
+  return (
+    <div style={{ maxHeight: 560, overflowY: "auto", overflowX: "hidden", background: "var(--bg)" }}>
+      {files.map((file, fileIndex) => (
+        <div
+          key={fileIndex}
+          style={{
+            minWidth: 0,
+            borderTop: fileIndex === 0 ? "none" : "1px solid var(--border)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            lineHeight: 1.55,
+          }}
+        >
+          {showFileHeaders && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
+                position: "sticky",
+                top: 0,
+                zIndex: 1,
+                background: "var(--bg-panel)",
+                borderBottom: "1px solid var(--border)",
+              }}
+            >
+              <SplitDiffHeader title={file.oldPath || "Before"} side="left" />
+              <SplitDiffHeader title={file.newPath || "After"} side="right" />
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)" }}>
+            {file.rows.map((row, rowIndex) => {
+              if (row.type === "hunk") {
+                return null;
+              }
+
+              return (
+                <div key={rowIndex} style={{ display: "contents" }}>
+                  <SplitDiffCellView cell={row.left} side="left" />
+                  <SplitDiffCellView cell={row.right} side="right" />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SplitDiffHeader({ title, side }: { title: string; side: "left" | "right" }) {
+  return (
+    <div
+      title={title}
+      style={{
+        padding: "5px 10px",
+        color: "var(--text-dim)",
+        borderRight: side === "left" ? "1px solid var(--border)" : "none",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {title}
+    </div>
+  );
+}
+
+function SplitDiffCellView({ cell, side }: { cell: SplitDiffCell; side: "left" | "right" }) {
+  const bg =
+    cell.type === "added"
+      ? "rgba(34,197,94,0.12)"
+      : cell.type === "removed"
+      ? "rgba(248,113,113,0.13)"
+      : cell.type === "empty"
+      ? "var(--bg-subtle)"
+      : "transparent";
+  const marker =
+    cell.type === "added" ? "+" : cell.type === "removed" ? "-" : " ";
+  const markerColor =
+    cell.type === "added" ? "#22c55e" : cell.type === "removed" ? "#f87171" : "var(--text-dim)";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        minWidth: 0,
+        background: bg,
+        borderRight: side === "left" ? "1px solid var(--border)" : "none",
+      }}
+    >
+      <span
+        style={{
+          width: 42,
+          padding: "0 6px",
+          textAlign: "right",
+          color: "var(--text-dim)",
+          userSelect: "none",
+          background: "var(--bg-panel)",
+          borderRight: "1px solid var(--border)",
+          flexShrink: 0,
+        }}
+      >
+        {cell.lineNo ?? ""}
+      </span>
+      <span
+        style={{
+          width: 18,
+          padding: "0 5px",
+          color: markerColor,
+          userSelect: "none",
+          fontWeight: cell.type === "context" || cell.type === "empty" ? 400 : 700,
+          flexShrink: 0,
+        }}
+      >
+        {marker}
+      </span>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: "0 10px 0 0",
+          color: cell.type === "empty" ? "var(--text-dim)" : "var(--text)",
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
+        }}
+      >
+        {cell.text || "\u00a0"}
+      </span>
+    </div>
+  );
+}
+
+function PatchTextView({ text }: { text: string }) {
+  const lines = text.split(/\r?\n/);
+
+  return (
+    <div style={{ maxHeight: 520, overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
+      {lines.map((line, i) => {
+        const kind =
+          line.startsWith("@@") ? "hunk" :
+          line.startsWith("+") && !line.startsWith("+++") ? "added" :
+          line.startsWith("-") && !line.startsWith("---") ? "removed" :
+          "context";
+        const bg =
+          kind === "added" ? "rgba(34,197,94,0.12)" :
+          kind === "removed" ? "rgba(248,113,113,0.13)" :
+          kind === "hunk" ? "rgba(96,165,250,0.12)" :
+          "transparent";
+        const color =
+          kind === "added" ? "#22c55e" :
+          kind === "removed" ? "#f87171" :
+          kind === "hunk" ? "var(--accent)" :
+          "var(--text)";
+
+        return (
+          <div
+            key={i}
+            style={{
+              display: "flex",
+              background: bg,
+              borderLeft: kind === "added"
+                ? "3px solid #22c55e"
+                : kind === "removed"
+                ? "3px solid #f87171"
+                : kind === "hunk"
+                ? "3px solid var(--accent)"
+                : "3px solid transparent",
+            }}
+          >
+            <span
+              style={{
+                width: 48,
+                padding: "0 8px",
+                color: "var(--text-dim)",
+                background: "var(--bg-panel)",
+                borderRight: "1px solid var(--border)",
+                textAlign: "right",
+                userSelect: "none",
+                flexShrink: 0,
+              }}
+            >
+              {i + 1}
+            </span>
+            <span style={{ padding: "0 10px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", color }}>
+              {line || "\u00a0"}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function parseUnifiedPatch(text: string): SplitDiffFile[] | null {
+  const files: SplitDiffFile[] = [];
+  let current: SplitDiffFile | null = null;
+  let pendingOldPath: string | undefined;
+  let oldLineNo = 0;
+  let newLineNo = 0;
+  let removed: PendingChangeLine[] = [];
+  let added: PendingChangeLine[] = [];
+
+  const emptyCell = (): SplitDiffCell => ({ lineNo: null, text: "", type: "empty" });
+  const flushChanges = () => {
+    if (!current) {
+      removed = [];
+      added = [];
+      return;
+    }
+    const count = Math.max(removed.length, added.length);
+    for (let i = 0; i < count; i++) {
+      const left = removed[i]
+        ? { lineNo: removed[i].lineNo, text: removed[i].text, type: "removed" as const }
+        : emptyCell();
+      const right = added[i]
+        ? { lineNo: added[i].lineNo, text: added[i].text, type: "added" as const }
+        : emptyCell();
+      current.rows.push({ type: "line", left, right });
+    }
+    removed = [];
+    added = [];
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("--- ")) {
+      flushChanges();
+      pendingOldPath = cleanPatchPath(line.slice(4));
+      continue;
+    }
+
+    if (line.startsWith("+++ ")) {
+      flushChanges();
+      current = { oldPath: pendingOldPath, newPath: cleanPatchPath(line.slice(4)), rows: [] };
+      files.push(current);
+      continue;
+    }
+
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      if (!current) {
+        current = { rows: [] };
+        files.push(current);
+      }
+      flushChanges();
+      oldLineNo = Number(hunk[1]);
+      newLineNo = Number(hunk[2]);
+      current.rows.push({ type: "hunk", text: line });
+      continue;
+    }
+
+    if (!current) continue;
+
+    if (line.startsWith("\\ ")) {
+      flushChanges();
+      current.rows.push({ type: "hunk", text: line });
+      continue;
+    }
+
+    const prefix = line[0];
+    const content = line.slice(1);
+
+    if (prefix === " ") {
+      flushChanges();
+      current.rows.push({
+        type: "line",
+        left: { lineNo: oldLineNo++, text: content, type: "context" },
+        right: { lineNo: newLineNo++, text: content, type: "context" },
+      });
+    } else if (prefix === "-") {
+      removed.push({ lineNo: oldLineNo++, text: content });
+    } else if (prefix === "+") {
+      added.push({ lineNo: newLineNo++, text: content });
+    } else if (line !== "") {
+      flushChanges();
+      current.rows.push({ type: "hunk", text: line });
+    }
+  }
+
+  flushChanges();
+
+  const parsed = files.filter((file) => file.rows.some((row) => row.type === "line"));
+  return parsed.length > 0 ? parsed : null;
+}
+
+function cleanPatchPath(path: string): string {
+  return path.split("\t")[0].trim();
+}
+
+function getResultDiff(result: ToolResultMessage): ResultDiff | null {
+  const details = (result as ToolResultMessage & { details?: unknown }).details;
+  if (!isRecord(details)) return null;
+
+  const patch = typeof details.patch === "string" ? details.patch : null;
+  if (patch) return { text: patch };
+
+  const diff = typeof details.diff === "string" ? details.diff : null;
+  if (diff) return { text: diff };
+
+  return null;
+}
+
+function isEditToolName(toolName: string): boolean {
+  const name = toolName.toLowerCase();
+  return name === "edit" ||
+    name.startsWith("edit_") ||
+    name.endsWith(".edit") ||
+    name.endsWith("_edit") ||
+    name.includes("str_replace") ||
+    name.includes("replace_editor");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function PairedResult({ text, isEmpty, isError }: {
@@ -688,6 +1063,209 @@ function PairedResult({ text, isEmpty, isError }: {
       </pre>
     </div>
   );
+}
+
+function CustomMessageView({ message }: { message: CustomMessage }) {
+  const isHiddenDisplay = message.display === false;
+  const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const text = getMessageText(message.content);
+  const images = getMessageImages(message.content);
+  const hasDetails = message.details !== undefined;
+  const detailsText = hasDetails ? safeJson(message.details) : "";
+  const title = formatCustomType(message.customType);
+  const time = formatTime(message.timestamp);
+
+  const copyContent = () => {
+    copyText(text || detailsText).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          overflow: "hidden",
+          background: isHiddenDisplay ? "var(--bg-subtle)" : "var(--bg)",
+          opacity: isHiddenDisplay && !contentExpanded ? 0.82 : 1,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 10px",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+            {title}
+          </span>
+          {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>hidden extension message</span>}
+          {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+        </div>
+
+        {contentExpanded ? (
+          <div style={{ padding: "6px 9px" }}>
+            {images.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: text ? 8 : 0 }}>
+                {images.map((img, i) => {
+                  const src = imageSource(img);
+                  if (!src) return null;
+                  return (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      key={i}
+                      src={src}
+                      alt=""
+                      style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+            {text ? <MarkdownBody className="markdown-custom-message">{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>(no message)</span>}
+          </div>
+        ) : (
+          <button
+            onClick={() => setContentExpanded(true)}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "8px 10px",
+              border: "none",
+              background: "transparent",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              fontSize: 12,
+              textAlign: "left",
+            }}
+          >
+            {text ? previewText(text) : "Show extension message"}
+          </button>
+        )}
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "4px 9px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-subtle)",
+          }}
+        >
+          {text || detailsText ? (
+            <button
+              onClick={copyContent}
+              style={{
+                padding: "3px 7px",
+                border: "none",
+                background: "none",
+                color: copied ? "var(--accent)" : "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 11,
+              }}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          ) : null}
+          {(hasDetails || isHiddenDisplay) && (
+            <button
+              onClick={() => {
+                if (isHiddenDisplay) setContentExpanded((v) => !v);
+                else setDetailsExpanded((v) => !v);
+              }}
+              style={{
+                marginLeft: "auto",
+                padding: "3px 7px",
+                border: "none",
+                background: "none",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 11,
+              }}
+            >
+              {isHiddenDisplay
+                ? (contentExpanded ? "Collapse" : "Expand")
+                : (detailsExpanded ? "Hide details" : "Show details")}
+            </button>
+          )}
+        </div>
+
+        {hasDetails && ((isHiddenDisplay && contentExpanded) || (!isHiddenDisplay && detailsExpanded)) && (
+          <pre
+            style={{
+              margin: 0,
+              padding: "9px 10px",
+              borderTop: "1px solid var(--border)",
+              background: "var(--bg)",
+              color: "var(--text-muted)",
+              fontSize: 12,
+              lineHeight: 1.5,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              maxHeight: 360,
+              overflow: "auto",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {detailsText}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function getMessageText(content: CustomMessage["content"] | UserMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((b): b is TextContent => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+function getMessageImages(content: CustomMessage["content"] | UserMessage["content"]): ImageContent[] {
+  if (typeof content === "string") return [];
+  return content.filter((b): b is ImageContent => b.type === "image");
+}
+
+function imageSource(img: ImageContent): string {
+  const flat = img as unknown as { data?: string; mimeType?: string };
+  if (img.source) {
+    return img.source.type === "base64"
+      ? `data:${img.source.media_type};base64,${img.source.data}`
+      : img.source.url ?? "";
+  }
+  return flat.data ? `data:${flat.mimeType};base64,${flat.data}` : "";
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatCustomType(type: string): string {
+  return type || "extension";
+}
+
+function previewText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "Show extension message";
+  return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 
 
