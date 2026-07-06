@@ -6,7 +6,7 @@ index 0000000..9b046f0
 @@ -0,0 +1,139 @@
 +import { NextResponse } from "next/server";
 +import { SessionManager, AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
-+import { completeSimple } from "@earendil-works/pi-ai";
++import { completeSimple } from "@earendil-works/pi-ai/compat";
 +import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
 +
 +const TITLE_PROMPT = `Summarize the following conversation in 3-8 words. Output ONLY the summary title, nothing else. No quotes, no punctuation at the end. Use the same language as the conversation.`;
@@ -144,10 +144,10 @@ index 0000000..9b046f0
 +  }
 +}
 diff --git a/components/AppShell.tsx b/components/AppShell.tsx
-index e123cdf..a419c3f 100644
+index 7f7fc56..533e95b 100644
 --- a/components/AppShell.tsx
 +++ b/components/AppShell.tsx
-@@ -165,6 +165,16 @@ export function AppShell() {
+@@ -255,6 +255,16 @@ export function AppShell() {
      setExplorerRefreshKey((k) => k + 1);
    }, []);
  
@@ -164,66 +164,90 @@ index e123cdf..a419c3f 100644
    const handleSessionForked = useCallback((newSessionId: string) => {
      setRefreshKey((k) => k + 1);
      setSessionKey((k) => k + 1);
-@@ -566,6 +576,7 @@ export function AppShell() {
-               onSystemPromptChange={handleSystemPromptChange}
+@@ -977,6 +987,7 @@ export function AppShell() {
                onSessionStatsChange={handleSessionStatsChange}
+               onSessionStatsPanelOpen={openSessionStatsPanel}
                onContextUsageChange={handleContextUsageChange}
 +              onTitleGenerated={handleTitleGenerated}
              />
            ) : showPlaceholder ? (
              activeCwd ? (
 diff --git a/components/ChatWindow.tsx b/components/ChatWindow.tsx
-index 6fc4224..ad9ee75 100644
+index 25f1662..542b6a3 100644
 --- a/components/ChatWindow.tsx
 +++ b/components/ChatWindow.tsx
-@@ -21,6 +21,7 @@ interface Props {
-   onSystemPromptChange?: (prompt: string | null) => void;
-   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
+@@ -24,6 +24,7 @@ interface Props {
+   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
+   onSessionStatsPanelOpen?: () => void;
    onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
 +  onTitleGenerated?: (sessionId: string, title: string) => void;
  }
  
  function phaseLabel(phase: AgentPhase): string {
-@@ -90,7 +91,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
-   );
- }
+@@ -43,7 +44,7 @@ const CHAT_MINIMAP_WIDTH = 36;
+ const CHAT_COLUMN_PADDING = 16;
+ const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
  
--export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
-+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onTitleGenerated }: Props) {
-   const {
-     loading, error, messages, entryIds, streamState,
-     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
-@@ -105,7 +106,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
-     handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
+-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange }: Props) {
++export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTitleGenerated }: Props) {
+   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
+   const isMobile = useIsMobile();
+ 
+@@ -81,7 +82,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
+     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
    } = useAgentSession({
-     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
--    modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
-+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onTitleGenerated,
+     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
+-    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
++    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen, onTitleGenerated,
    });
  
-   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
+   // Push session stats up to AppShell for the top bar.
 diff --git a/hooks/useAgentSession.ts b/hooks/useAgentSession.ts
-index fa7181d..d3348e2 100644
+index 9577e5e..639ae3b 100644
 --- a/hooks/useAgentSession.ts
 +++ b/hooks/useAgentSession.ts
-@@ -78,0 +79 @@ export interface UseAgentSessionOptions {
+@@ -148,6 +148,7 @@ export interface UseAgentSessionOptions {
+   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
+   onSystemPromptChange?: (prompt: string | null) => void;
+   onSessionStatsPanelOpen?: () => void;
 +  onTitleGenerated?: (sessionId: string, title: string) => void;
-@@ -119 +120 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
--    modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
-+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onTitleGenerated,
-@@ -302,0 +304,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
-+          const currentSessionId = sessionIdRef.current;
-+          const sessionHasName = !!session?.name;
-+          if (!sessionHasName) {
-+            fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/generate-title`, { method: "POST" })
-+              .then((r) => r.json())
-+              .then((data: { title?: string; skipped?: boolean; error?: string }) => {
-+                if (data.title && !data.skipped) {
-+                  onTitleGenerated?.(currentSessionId, data.title);
-+                }
-+              })
-+              .catch(() => {});
-+          }
-@@ -371 +385 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
--  }, [loadSession, onAgentEnd]);
-+  }, [loadSession, onAgentEnd, onTitleGenerated, session?.name]);
+   setToolPreset?: (preset: "none" | "default" | "full") => void;
+ }
+ 
+@@ -304,7 +305,7 @@ type SlashCommandsResponse = {
+ export function useAgentSession(opts: UseAgentSessionOptions) {
+   const {
+     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
++    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen, onTitleGenerated,
+   } = opts;
+ 
+   const isNew = session === null && newSessionCwd !== null;
+@@ -820,6 +821,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
+             })
+             .catch(() => {});
+         }
++        const currentSessionId = sessionIdRef.current;
++        const sessionHasName = !!session?.name;
++        if (currentSessionId && !sessionHasName) {
++          fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/generate-title`, { method: "POST" })
++            .then((r) => r.json())
++            .then((data: { title?: string; skipped?: boolean; error?: string }) => {
++              if (data.title && !data.skipped) {
++                onTitleGenerated?.(currentSessionId, data.title);
++              }
++            })
++            .catch(() => {});
++        }
+         onAgentEnd?.();
+         break;
+       case "prompt_done":
+@@ -935,7 +948,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
+         handleExtensionUiRequest(event as ExtensionUiRequest);
+         break;
+     }
+-  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd]);
++  }, [addNotice, finishPromptWithoutStream, handleExtensionUiRequest, loadSession, onAgentEnd, onTitleGenerated, session?.name]);
+   handleAgentEventRef.current = handleAgentEvent;
+ 
+   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
