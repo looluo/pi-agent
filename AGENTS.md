@@ -26,3 +26,17 @@
 - Root packaging changes upstream UI behavior in `scripts/build-webapp.mjs`, not directly in the temporary build copy.
 - The build script currently changes the page title, injects Tauri `select_directory` browsing into `components/SessionSidebar.tsx`, enables Next standalone output, and applies `patches/pi-web/auto-session-title.patch`.
 - If `pi-web` upstream changes make packaging fail, check the exact string markers in `scripts/build-webapp.mjs` before changing Rust or Tauri config.
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown — issues live as files under `.scratch/<feature>/`. No PR triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five defaults: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

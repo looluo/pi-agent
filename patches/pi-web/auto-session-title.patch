@@ -97,8 +97,8 @@ index 0000000..9b046f0
 +        ],
 +      },
 +      {
-+        maxTokens: 60,
-+        temperature: 0.3,
++        maxTokens: 2048,
++        reasoning: "minimal",
 +        apiKey: auth.apiKey,
 +        ...(auth.headers ? { headers: auth.headers } : {}),
 +      }
@@ -237,7 +237,7 @@ index 9577e5e..639ae3b 100644
 +                onTitleGenerated?.(currentSessionId, data.title);
 +              }
 +            })
-+            .catch(() => {});
++            .catch((e) => console.warn("[generate-title]", e));
 +        }
          onAgentEnd?.();
          break;
