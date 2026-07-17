@@ -1,6 +1,8 @@
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, Theme } from "@earendil-works/pi-coding-agent";
+import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import { cacheSessionPath } from "./session-reader";
+import { invalidateModelsCache } from "./models-cache";
+import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
@@ -55,6 +57,34 @@ type ExtensionBindingOptions = {
 };
 
 const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+
+// Extensions require a complete Theme, while the web UI applies its own styling.
+class PlainTextTheme extends Theme {
+  constructor() {
+    super(
+      { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
+      {} as ConstructorParameters<typeof Theme>[1],
+      "truecolor",
+    );
+  }
+
+  override fg(...[, text]: Parameters<Theme["fg"]>): string { return text; }
+  override bg(...[, text]: Parameters<Theme["bg"]>): string { return text; }
+  override bold(text: string): string { return text; }
+  override italic(text: string): string { return text; }
+  override underline(text: string): string { return text; }
+  override inverse(text: string): string { return text; }
+  override strikethrough(text: string): string { return text; }
+  override getFgAnsi(): string { return ""; }
+  override getBgAnsi(): string { return ""; }
+  override getThinkingBorderColor(): (text: string) => string {
+    return (text) => text;
+  }
+  override getBashModeBorderColor(): (text: string) => string { return (text) => text; }
+}
+
+const PLAIN_TEXT_THEME = new PlainTextTheme();
+const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
 
 function withExtensionTools(session: AgentSessionLike, toolNames: string[]): string[] {
   if (toolNames.length === 0) return [];
@@ -111,6 +141,9 @@ export class AgentSessionWrapper {
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
+      if (event.type === "agent_end") {
+        invalidateSessionListCache();
+      }
       this.emit(event);
       // Streaming / compaction / tool events flow through here; re-broadcast
       // the running-status snapshot so the sidebar can update live.
@@ -258,6 +291,7 @@ export class AgentSessionWrapper {
           notifyRunningChange();
         }).catch((error) => {
           this.promptRunning = false;
+          invalidateSessionListCache();
           this.emit({
             type: "prompt_error",
             errorMessage: error instanceof Error ? error.message : String(error),
@@ -302,10 +336,11 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
-        const registry = this.inner.modelRegistry;
-        const model = registry.find(provider, modelId);
+        const model = this.inner.modelRuntime.getModel(provider, modelId);
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
         await this.inner.setModel(model);
+        invalidateModelsCache();
+        invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
       }
 
@@ -338,6 +373,7 @@ export class AgentSessionWrapper {
 
         const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
+        invalidateSessionListCache();
         this.destroy();
         return { cancelled: false, newSessionId };
       }
@@ -356,20 +392,25 @@ export class AgentSessionWrapper {
         if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
           this.inner.agent.state.thinkingLevel = "xhigh";
         }
+        invalidateSessionListCache();
         return null;
       }
 
       case "compact": {
-        const result = await this.withFinalRunningNotification(() =>
-          this.inner.compact(command.customInstructions as string | undefined)
-        );
-        return result;
+        try {
+          return await this.withFinalRunningNotification(() =>
+            this.inner.compact(command.customInstructions as string | undefined)
+          );
+        } finally {
+          invalidateSessionListCache();
+        }
       }
 
       case "set_session_name": {
         const name = (command.name as string | undefined)?.trim();
         if (!name) throw new Error("Session name cannot be empty");
         this.inner.setSessionName(name);
+        invalidateSessionListCache();
         return null;
       }
 
@@ -594,38 +635,59 @@ export class AgentSessionWrapper {
     const width = this.getCustomUiWidth(options);
 
     return new Promise<T>((resolve) => {
+      let completed = false;
       const tui = {
         requestRender: () => {
           const custom = this.activeCustomUis.get(id);
           if (custom) this.emitCustomUiRender(id, custom);
         },
       };
-      const done = (value: T) => this.closeCustomUi(id, value);
+      const finish = (value: T) => {
+        if (completed) return;
+        completed = true;
+        resolve(value);
+      };
+      const done = (value: T) => {
+        if (this.activeCustomUis.has(id)) {
+          this.closeCustomUi(id, value);
+        } else {
+          finish(value);
+        }
+      };
 
       Promise.resolve()
-        .then(() => factory(tui, undefined, undefined, done))
+        .then(() => factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
         .then((component) => {
+          if (completed) {
+            try {
+              (component as CustomUiComponent | undefined)?.dispose?.();
+            } catch {
+              // Ignore dispose errors from a component completed before mounting.
+            }
+            return;
+          }
           if (!component || typeof component !== "object" || typeof (component as CustomUiComponent).render !== "function") {
-            resolve(undefined as T);
+            finish(undefined as T);
             return;
           }
           const custom: ActiveCustomUi = {
             component: component as CustomUiComponent,
             width,
-            resolve: (value) => resolve(value as T),
+            resolve: (value) => finish(value as T),
             settled: false,
           };
           this.activeCustomUis.set(id, custom);
           this.emitCustomUiRender(id, custom);
         })
         .catch((error) => {
+          if (completed) return;
           this.emit({
             type: "extension_error",
             extensionPath: `custom-ui:${id}`,
             event: "custom_ui",
             error: error instanceof Error ? error.message : String(error),
           });
-          resolve(undefined as T);
+          finish(undefined as T);
         });
     });
   }
@@ -779,7 +841,7 @@ export class AgentSessionWrapper {
       addAutocompleteProvider: () => {},
       setEditorComponent: () => {},
       getEditorComponent: () => undefined,
-      get theme() { return undefined; },
+      get theme() { return PLAIN_TEXT_THEME; },
       getAllThemes: () => [],
       getTheme: () => undefined,
       setTheme: () => ({ success: false, error: "Theme switching is not supported in pi-web extension UI yet" }),
@@ -911,7 +973,8 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const starting = (async () => {
-    const { SessionManager, getAgentDir } = await import("@earendil-works/pi-coding-agent");
+    // Some extensions access the SDK's global theme even outside the terminal UI.
+    initTheme();
     const agentDir = getAgentDir();
 
     const sessionManager = sessionFile
@@ -919,7 +982,7 @@ export async function startRpcSession(
       : SessionManager.create(cwd, undefined);
 
     // Determine which tools to pass based on requested toolNames.
-    // Since v0.68.0, createAgentSession expects string[] tool names instead of Tool[] instances.
+    // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
     let toolsOption: string[] | undefined;
     if (toolNames !== undefined) {
       // toolNames === [] -> "all off" (an empty allow-list disables every tool).
@@ -932,9 +995,11 @@ export async function startRpcSession(
       toolsOption = toolNames.length === 0 ? [] : undefined;
     }
 
-    const { session: inner } = await createAgentSession({
-      cwd,
-      agentDir,
+    // Build services first so extension-registered providers are available
+    // before the SDK restores the saved model from the session file.
+    const services = await createAgentSessionServices({ cwd, agentDir });
+    const { session: inner } = await createAgentSessionFromServices({
+      services,
       sessionManager,
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
     });

@@ -41,8 +41,8 @@ interface Props {
   compactResult?: CompactResultInfo | null;
   toolPreset?: "none" | "default" | "full";
   onToolPresetChange?: (preset: "none" | "default" | "full") => void;
-  thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh") => void;
+  thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
@@ -78,7 +78,7 @@ function compareModelOptions(a: ModelOption, b: ModelOption): number {
     || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
 }
 
-const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
   auto: "Use pi default",
   off: "Reasoning off",
@@ -86,7 +86,8 @@ const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
   low: "Low reasoning",
   medium: "Medium reasoning",
   high: "High reasoning",
-  xhigh: "Max reasoning",
+  xhigh: "Extra-high reasoning",
+  max: "Max reasoning",
 };
 
 function formatTokenCount(tokens: number): string {
@@ -105,6 +106,7 @@ type SlashCommandSource = SlashCommandPaletteItem["source"];
 
 const BUILTIN_SLASH_COMMANDS: SlashCommandPaletteItem[] = [
   { name: "compact", description: "Compress context, optionally with instructions", source: "builtin" },
+  { name: "reload", description: "Reload extensions, skills, prompts, and tools", source: "builtin" },
   { name: "name", description: "Set the session display name", source: "builtin" },
   { name: "session", description: "Show session message, token, and cost stats", source: "builtin" },
   { name: "copy", description: "Copy the last assistant message", source: "builtin" },
@@ -729,6 +731,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
 
+      // Esc stops the agent when no slash/@ menu or IME composition is active.
+      if (e.key === "Escape" && !isComposing && isStreaming && onAbort) {
+        e.preventDefault();
+        onAbort();
+        return;
+      }
+
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
@@ -739,7 +748,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion]
+    [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion]
   );
 
   const handleInput = useCallback(() => {

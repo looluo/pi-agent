@@ -1,7 +1,11 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { memo, useState, useRef, useEffect, useMemo } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import { copyText } from "@/lib/clipboard";
+import { parseCompactionSummary } from "@/lib/compaction-summary";
+import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import type {
   AgentMessage,
   UserMessage,
@@ -15,11 +19,45 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 
+const MAX_THINKING_CACHE_ENTRIES = 100;
+const thinkingContentCache = new Map<string, Promise<string>>();
+
+function loadThinkingContent(sessionId: string, entryId: string, blockIndex: number): Promise<string> {
+  const key = `${sessionId}:${entryId}:${blockIndex}`;
+  const cached = thinkingContentCache.get(key);
+  if (cached) {
+    thinkingContentCache.delete(key);
+    thinkingContentCache.set(key, cached);
+    return cached;
+  }
+
+  const request = fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/thinking?blockIndex=${blockIndex}`,
+  ).then(async (response) => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json() as { thinking?: unknown };
+    if (typeof data.thinking !== "string") throw new Error("Invalid thinking response");
+    return data.thinking;
+  }).catch((error) => {
+    thinkingContentCache.delete(key);
+    throw error;
+  });
+
+  thinkingContentCache.set(key, request);
+  if (thinkingContentCache.size > MAX_THINKING_CACHE_ENTRIES) {
+    const oldestKey = thinkingContentCache.keys().next().value;
+    if (oldestKey) thinkingContentCache.delete(oldestKey);
+  }
+  return request;
+}
+
 interface Props {
   message: AgentMessage;
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
+  cwd?: string;
+  onOpenFile?: (filePath: string) => void;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
@@ -28,6 +66,7 @@ interface Props {
   onEditContent?: (content: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
+  sessionId?: string;
 }
 
 function formatTime(ts?: number): string | null {
@@ -43,44 +82,60 @@ function formatTime(ts?: number): string | null {
   return `${date} ${time}`;
 }
 
-function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
+function haveSameRelevantToolResults(
+  message: AgentMessage,
+  previous: Map<string, ToolResultMessage> | undefined,
+  next: Map<string, ToolResultMessage> | undefined,
+): boolean {
+  if (previous === next || message.role !== "assistant") return true;
+  for (const block of (message as AssistantMessage).content ?? []) {
+    if (block.type === "toolCall" && previous?.get(block.toolCallId) !== next?.get(block.toolCallId)) {
+      return false;
+    }
   }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-    return Promise.resolve();
-  } catch {
-    return Promise.reject();
-  }
+  return true;
 }
 
-export function MessageView({ message, isStreaming, toolResults, modelNames, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
     return null;
   }
   if (message.role === "custom") {
-    return <CustomMessageView message={message as CustomMessage} />;
+    if ((message as CustomMessage).customType === "compaction") {
+      return <CompactionMessageView message={message as CustomMessage} />;
+    }
+    return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   return null;
-}
+}, (prev, next) => {
+  return prev.message === next.message
+    && prev.isStreaming === next.isStreaming
+    && haveSameRelevantToolResults(prev.message, prev.toolResults, next.toolResults)
+    && prev.modelNames === next.modelNames
+    && prev.cwd === next.cwd
+    && prev.onOpenFile === next.onOpenFile
+    && prev.entryId === next.entryId
+    && prev.onFork === next.onFork
+    && prev.forking === next.forking
+    && prev.onNavigate === next.onNavigate
+    && prev.prevAssistantEntryId === next.prevAssistantEntryId
+    && prev.onEditContent === next.onEditContent
+    && prev.showTimestamp === next.showTimestamp
+    && prev.prevTimestamp === next.prevTimestamp
+    && prev.sessionId === next.sessionId;
+});
 
-function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {
+function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {
   message: UserMessage;
+  cwd?: string;
+  onOpenFile?: (filePath: string) => void;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
@@ -161,7 +216,7 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
               })}
             </div>
           )}
-          {content && <MarkdownBody className="markdown-user-message">{content}</MarkdownBody>}
+          {content && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</MarkdownBody>}
         </div>
 
       </div>
@@ -282,24 +337,35 @@ function AssistantMessageView({
   isStreaming,
   toolResults,
   modelNames,
+  cwd,
+  onOpenFile,
   showTimestamp,
   prevTimestamp,
+  sessionId,
+  entryId,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
+  cwd?: string;
+  onOpenFile?: (filePath: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
+  sessionId?: string;
+  entryId?: string;
 }) {
   const time = showTimestamp ? formatTime(message.timestamp) : null;
-  const blocks = message.content ?? [];
+  const blockItems = (message.content ?? [])
+    .map((block, originalIndex) => ({ block, originalIndex }))
+    .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
+  const blocks = blockItems.map(({ block }) => block);
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
-  const blocksRef = useRef(blocks);
-  blocksRef.current = blocks;
+  const blockItemsRef = useRef(blockItems);
+  blockItemsRef.current = blockItems;
 
   // Streaming-based timing for thinking blocks
   const blockStartTimesRef = useRef<Map<number, number>>(new Map());
@@ -343,7 +409,7 @@ function AssistantMessageView({
   useEffect(() => {
     if (!isStreaming) {
       // Finalise any un-finished thinking block durations on stream end
-      const now = Date.now();
+      const now = new Date().getTime();
       setStreamingDurations((prev: Map<number, number>) => {
         const next = new Map(prev);
         for (const [idx, start] of blockStartTimesRef.current) {
@@ -356,23 +422,26 @@ function AssistantMessageView({
       return;
     }
     const tick = () => {
-      const bs = blocksRef.current;
+      const items = blockItemsRef.current;
+      const bs = items.map(({ block }) => block);
       const now = Date.now();
 
       // Record start time for each block the first time we see it
-      bs.forEach((_, i) => {
-        if (!blockStartTimesRef.current.has(i)) blockStartTimesRef.current.set(i, now);
+      items.forEach(({ originalIndex }) => {
+        if (!blockStartTimesRef.current.has(originalIndex)) blockStartTimesRef.current.set(originalIndex, now);
       });
 
       // When a non-last block has a successor already started, finalise its duration
       setStreamingDurations((prev: Map<number, number>) => {
         let changed = false;
         const next = new Map(prev);
-        for (let i = 0; i < bs.length - 1; i++) {
-          if (!next.has(i) && blockStartTimesRef.current.has(i)) {
-            const start = blockStartTimesRef.current.get(i)!;
-            const nextStart = blockStartTimesRef.current.get(i + 1) ?? now;
-            next.set(i, Math.round((nextStart - start) / 1000));
+        for (let i = 0; i < items.length - 1; i++) {
+          const originalIndex = items[i].originalIndex;
+          const nextOriginalIndex = items[i + 1].originalIndex;
+          if (!next.has(originalIndex) && blockStartTimesRef.current.has(originalIndex)) {
+            const start = blockStartTimesRef.current.get(originalIndex)!;
+            const nextStart = blockStartTimesRef.current.get(nextOriginalIndex) ?? now;
+            next.set(originalIndex, Math.round((nextStart - start) / 1000));
             changed = true;
           }
         }
@@ -393,6 +462,8 @@ function AssistantMessageView({
     const id = setInterval(tick, 300);
     return () => clearInterval(id);
   }, [isStreaming]);
+
+  if (blocks.length === 0 && !isStreaming) return null;
 
   return (
     <div
@@ -449,8 +520,8 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {blocks.map((block, i) => (
-          <BlockView key={i} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} />
+        {blockItems.map(({ block, originalIndex }) => (
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
         ))}
       </div>
 
@@ -503,12 +574,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number> }) {
+function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
   if (block.type === "text") {
-    return <TextBlock block={block as TextContent} isStreaming={isStreaming} />;
+    return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -519,12 +590,42 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
   return null;
 }
 
-function TextBlock({ block, isStreaming }: { block: TextContent; isStreaming?: boolean }) {
-  return <MarkdownBody isStreaming={isStreaming}>{block.text}</MarkdownBody>;
+function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
 }
 
-function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?: number }) {
+function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
+  block: ThinkingContent;
+  duration?: number;
+  sessionId?: string;
+  entryId?: string;
+  blockIndex: number;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    const nextExpanded = !expanded;
+    setExpanded(nextExpanded);
+    if (!nextExpanded || !block.deferred || content !== null) return;
+    if (!sessionId || !entryId) {
+      setError("Thinking content unavailable");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      setContent(await loadThinkingContent(sessionId, entryId, blockIndex));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -535,7 +636,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
       }}
     >
       <button
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => void toggle()}
         style={{
           display: "flex",
           alignItems: "center",
@@ -559,7 +660,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
         <div
           style={{
             padding: "8px 10px",
-            color: "var(--text-muted)",
+            color: error ? "#f87171" : "var(--text-muted)",
             fontSize: 12,
             lineHeight: 1.6,
             whiteSpace: "pre-wrap",
@@ -567,7 +668,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
             borderTop: "1px solid var(--border)",
           }}
         >
-          {block.thinking}
+          {loading ? "Loading thinking..." : error ?? (block.deferred ? content : block.thinking)}
         </div>
       )}
     </div>
@@ -669,29 +770,6 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
 }
 
 interface ResultDiff {
-  text: string;
-}
-
-type SplitDiffCellType = "context" | "removed" | "added" | "empty";
-
-interface SplitDiffCell {
-  lineNo: number | null;
-  text: string;
-  type: SplitDiffCellType;
-}
-
-type SplitDiffRow =
-  | { type: "hunk"; text: string }
-  | { type: "line"; left: SplitDiffCell; right: SplitDiffCell };
-
-interface SplitDiffFile {
-  oldPath?: string;
-  newPath?: string;
-  rows: SplitDiffRow[];
-}
-
-interface PendingChangeLine {
-  lineNo: number;
   text: string;
 }
 
@@ -909,101 +987,6 @@ function PatchTextView({ text }: { text: string }) {
   );
 }
 
-function parseUnifiedPatch(text: string): SplitDiffFile[] | null {
-  const files: SplitDiffFile[] = [];
-  let current: SplitDiffFile | null = null;
-  let pendingOldPath: string | undefined;
-  let oldLineNo = 0;
-  let newLineNo = 0;
-  let removed: PendingChangeLine[] = [];
-  let added: PendingChangeLine[] = [];
-
-  const emptyCell = (): SplitDiffCell => ({ lineNo: null, text: "", type: "empty" });
-  const flushChanges = () => {
-    if (!current) {
-      removed = [];
-      added = [];
-      return;
-    }
-    const count = Math.max(removed.length, added.length);
-    for (let i = 0; i < count; i++) {
-      const left = removed[i]
-        ? { lineNo: removed[i].lineNo, text: removed[i].text, type: "removed" as const }
-        : emptyCell();
-      const right = added[i]
-        ? { lineNo: added[i].lineNo, text: added[i].text, type: "added" as const }
-        : emptyCell();
-      current.rows.push({ type: "line", left, right });
-    }
-    removed = [];
-    added = [];
-  };
-
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith("--- ")) {
-      flushChanges();
-      pendingOldPath = cleanPatchPath(line.slice(4));
-      continue;
-    }
-
-    if (line.startsWith("+++ ")) {
-      flushChanges();
-      current = { oldPath: pendingOldPath, newPath: cleanPatchPath(line.slice(4)), rows: [] };
-      files.push(current);
-      continue;
-    }
-
-    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hunk) {
-      if (!current) {
-        current = { rows: [] };
-        files.push(current);
-      }
-      flushChanges();
-      oldLineNo = Number(hunk[1]);
-      newLineNo = Number(hunk[2]);
-      current.rows.push({ type: "hunk", text: line });
-      continue;
-    }
-
-    if (!current) continue;
-
-    if (line.startsWith("\\ ")) {
-      flushChanges();
-      current.rows.push({ type: "hunk", text: line });
-      continue;
-    }
-
-    const prefix = line[0];
-    const content = line.slice(1);
-
-    if (prefix === " ") {
-      flushChanges();
-      current.rows.push({
-        type: "line",
-        left: { lineNo: oldLineNo++, text: content, type: "context" },
-        right: { lineNo: newLineNo++, text: content, type: "context" },
-      });
-    } else if (prefix === "-") {
-      removed.push({ lineNo: oldLineNo++, text: content });
-    } else if (prefix === "+") {
-      added.push({ lineNo: newLineNo++, text: content });
-    } else if (line !== "") {
-      flushChanges();
-      current.rows.push({ type: "hunk", text: line });
-    }
-  }
-
-  flushChanges();
-
-  const parsed = files.filter((file) => file.rows.some((row) => row.type === "line"));
-  return parsed.length > 0 ? parsed : null;
-}
-
-function cleanPatchPath(path: string): string {
-  return path.split("\t")[0].trim();
-}
-
 function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   const details = (result as ToolResultMessage & { details?: unknown }).details;
   if (!isRecord(details)) return null;
@@ -1065,7 +1048,88 @@ function PairedResult({ text, isEmpty, isError }: {
   );
 }
 
-function CustomMessageView({ message }: { message: CustomMessage }) {
+function CompactionMessageView({ message }: { message: CustomMessage }) {
+  const summary = getMessageText(message.content);
+  const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
+  const time = formatTime(message.timestamp);
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          overflow: "hidden",
+          background: "var(--bg)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 10px",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+          }}
+        >
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+            compaction
+          </span>
+          {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+        </div>
+
+        <div style={{ padding: "11px 13px 12px" }}>
+          <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>
+            Conversation compacted
+          </div>
+          <div style={{ marginTop: 3, marginBottom: 10, color: "var(--text)", fontSize: 14, lineHeight: 1.5 }}>
+            The conversation history before this point was compacted into the following summary:
+          </div>
+          {parsedSummary.body ? (
+            <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
+          ) : (
+            <span style={{ color: "var(--text-dim)", fontSize: 12 }}>(no summary)</span>
+          )}
+          <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompactionFileMetadata({ readFiles, modifiedFiles }: { readFiles: string[]; modifiedFiles: string[] }) {
+  const total = readFiles.length + modifiedFiles.length;
+  if (total === 0) return null;
+
+  const parts = [];
+  if (readFiles.length > 0) parts.push(`${readFiles.length} read`);
+  if (modifiedFiles.length > 0) parts.push(`${modifiedFiles.length} modified`);
+
+  return (
+    <details className="compaction-file-details">
+      <summary>File context: {parts.join(", ")}</summary>
+      {modifiedFiles.length > 0 && <CompactionFileList title="Modified files" files={modifiedFiles} />}
+      {readFiles.length > 0 && <CompactionFileList title="Read files" files={readFiles} />}
+    </details>
+  );
+}
+
+function CompactionFileList({ title, files }: { title: string; files: string[] }) {
+  return (
+    <div className="compaction-file-section">
+      <div className="compaction-file-title">{title}</div>
+      <ul className="compaction-file-list">
+        {files.map((file) => (
+          <li key={file}>{file}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const isHiddenDisplay = message.display === false;
   const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -1133,7 +1197,7 @@ function CustomMessageView({ message }: { message: CustomMessage }) {
                 })}
               </div>
             )}
-            {text ? <MarkdownBody className="markdown-custom-message">{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>(no message)</span>}
+            {text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>(no message)</span>}
           </div>
         ) : (
           <button

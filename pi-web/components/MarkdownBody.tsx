@@ -1,39 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
+import { copyText } from "@/lib/clipboard";
+import { resolveLocalFileHref } from "@/lib/file-links";
 import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown";
 
 interface MarkdownBodyProps {
   children: string;
   className?: string;
   isStreaming?: boolean;
+  cwd?: string;
+  onOpenFile?: (filePath: string) => void;
 }
 
-function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-    return Promise.resolve();
-  } catch {
-    return Promise.reject();
-  }
-}
-
-export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
 
   return (
@@ -63,6 +48,34 @@ export function MarkdownBody({ children, className, isStreaming }: MarkdownBodyP
           },
           pre({ children }) {
             return <>{children}</>;
+          },
+          a({ href, children, ...props }) {
+            // `node` is react-markdown metadata, not a DOM attribute.
+            delete props.node;
+            const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
+            const openFile = onOpenFile;
+            if (!filePath || !openFile) {
+              return (
+                <a href={href} {...props} target="_blank" rel="noopener noreferrer">
+                  {children}
+                </a>
+              );
+            }
+
+            const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+              if (event.defaultPrevented || event.button !== 0) return;
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              const target = event.currentTarget.getAttribute("target");
+              if (target && target !== "_self") return;
+              event.preventDefault();
+              openFile(filePath);
+            };
+
+            return (
+              <a href={href} {...props} onClick={handleClick}>
+                {children}
+              </a>
+            );
           },
           table({ children }) {
             return (
