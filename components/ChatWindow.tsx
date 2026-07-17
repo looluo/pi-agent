@@ -1,7 +1,9 @@
 "use client";
-
-import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
-import type { AgentMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
+import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -10,6 +12,13 @@ import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import {
+  captureScrollDistance,
+  getNextVisibleCount,
+  getVisibleRenderWindow,
+  restoreScrollTop,
+  VISIBLE_PAGE_SIZE,
+} from "@/lib/chat-lazy-load";
 
 interface Props {
   session: SessionInfo | null;
@@ -24,6 +33,7 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+  onOpenFile?: (filePath: string) => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -43,7 +53,94 @@ const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
 const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange }: Props) {
+function hasFinalAssistantAnswer(message: AgentMessage): boolean {
+  if (message.role !== "assistant") return false;
+  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
+    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
+  ));
+}
+
+function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
+  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
+    if (hasFinalAssistantAnswer(messages[candidateIdx])) return candidateIdx;
+  }
+  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
+    if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
+  }
+  return -1;
+}
+
+function countToolCalls(messages: AgentMessage[], indices: number[]): number {
+  let count = 0;
+  for (const idx of indices) {
+    const msg = messages[idx];
+    if (msg?.role !== "assistant") continue;
+    count += countToolCallBlocks(getDisplayableAssistantBlocks(msg as AssistantMessage));
+  }
+  return count;
+}
+
+function hasDisplayableProcessMessage(message: AgentMessage): boolean {
+  if (message.role === "assistant") {
+    return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
+  }
+  return message.role === "custom";
+}
+
+function withAssistantBlocks(
+  message: AssistantMessage,
+  content: AssistantContentBlock[],
+  options: { omitUsage?: boolean } = {},
+): AssistantMessage {
+  const next = { ...message, content };
+  if (options.omitUsage) next.usage = undefined;
+  return next;
+}
+
+function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const parts = ["Process details", `${messageCount} ${messageCount === 1 ? "message" : "messages"}`];
+  if (toolCallCount > 0) parts.push(`${toolCallCount} ${toolCallCount === 1 ? "tool call" : "tool calls"}`);
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "auto",
+          minHeight: 24,
+          padding: "2px 0",
+          border: "none",
+          background: "transparent",
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 12,
+          textAlign: "left",
+        }}
+        title={expanded ? "Collapse process details" : "Expand process details"}
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
+          <polyline points="4 2.5 7.5 6 4 9.5" />
+        </svg>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {parts.join(" · ")}
+        </span>
+      </button>
+      {expanded && (
+        <div style={{ marginTop: 8 }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
 
@@ -62,6 +159,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     onAgentEnd?.();
   }, [onAgentEnd]);
 
+  // 稳定化 onEditContent 引用，配合 React.memo 防止历史消息重渲染
+  const handleEditContent = useCallback((content: string) => {
+    chatInputRef?.current?.insertIfEmpty(content);
+  }, [chatInputRef]);
+
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -72,7 +174,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     isAutoModelSelection,
     agentPhase,
     isNew,
-    messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
@@ -84,6 +186,47 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
 
+  // Register the abort handler for the global Esc shortcut
+  useEffect(() => {
+    registerAbortHandler(agentRunning ? handleAbort : null);
+  }, [agentRunning, handleAbort]);
+
+  // --- Lazy-load historical messages ---
+  // Only render the last N messages initially. When the user scrolls to the
+  // top, load another page while keeping the scroll position stable.
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const prevScrollDistanceRef = useRef<number | null>(null);
+
+  // IntersectionObserver on the sentinel div at the top of the message list.
+  // When it becomes visible, load the next page of older messages.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const container = scrollContainerRef.current;
+    if (!sentinel || !container) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          // Save distance from top before prepending to restore scroll later
+          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+          setVisibleCount((prev) => getNextVisibleCount(prev));
+        }
+      },
+      { root: container, threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [visibleCount, messages.length, scrollContainerRef]);
+
+  // After visibleCount increases (more messages prepended), restore the
+  // scroll position so the viewport doesn't jump.
+  useEffect(() => {
+    if (prevScrollDistanceRef.current == null) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
+    prevScrollDistanceRef.current = null;
+  }, [visibleCount, scrollContainerRef]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -133,6 +276,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const messageRefs = useMessageRefs(visibleMessages.length);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
+  const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -312,24 +456,40 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             {(() => {
-              const toolResultsMap = new Map<string, import("@/lib/types").ToolResultMessage>();
+              const toolResultsMap = new Map<string, ToolResultMessage>();
               for (const msg of messages) {
                 if (msg.role === "toolResult") {
-                  toolResultsMap.set((msg as import("@/lib/types").ToolResultMessage).toolCallId, msg as import("@/lib/types").ToolResultMessage);
+                  toolResultsMap.set((msg as ToolResultMessage).toolCallId, msg as ToolResultMessage);
                 }
               }
+
               let lastUserIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (messages[i].role === "user") { lastUserIdx = i; break; }
               }
+
+              const visibleRefIndexByMessage = new Map<number, number>();
               let refIdx = 0;
-              return messages.map((msg, idx) => {
+              messages.forEach((msg, idx) => {
+                if (msg.role === "user" || msg.role === "assistant") {
+                  visibleRefIndexByMessage.set(idx, refIdx++);
+                }
+              });
+
+              const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
+                messageRefs.current[refIndex] = el;
+                if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
+              };
+
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
+                const msg = options.messageOverride ?? messages[idx];
                 const prevAssistantEntryId =
                   msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
                     ? entryIds[idx - 1]
                     : undefined;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
-                const currentRefIdx = isVisible ? refIdx++ : -1;
+                const currentRefIdx = visibleRefIndexByMessage.get(idx);
+                const keyPrefix = options.keyPrefix ?? "message";
                 let showTimestamp = false;
                 if (msg.role === "assistant") {
                   showTimestamp = true;
@@ -343,36 +503,129 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     showTimestamp = false;
                   }
                 }
+                if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
                 const view = (
                   <MessageView
-                    key={idx}
+                    key={`${keyPrefix}-view-${idx}`}
                     message={msg}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
+                    cwd={messageCwd}
+                    onOpenFile={onOpenFile}
                     entryId={entryIds[idx]}
                     onFork={agentRunning || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     onNavigate={agentRunning ? undefined : handleNavigate}
                     prevAssistantEntryId={agentRunning ? undefined : prevAssistantEntryId}
-                    onEditContent={(content) => chatInputRef?.current?.insertIfEmpty(content)}
+                    onEditContent={handleEditContent}
                     showTimestamp={showTimestamp}
-                    prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
+                    prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
+                    sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                   />
                 );
-                if (!isVisible) return view;
+                if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
                 return (
-                  <div key={idx} ref={(el) => {
-                    messageRefs.current[currentRefIdx] = el;
-                    if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
-                  }}>
+                  <div key={`${keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
                     {view}
                   </div>
                 );
-              });
-            })()}
+              };
 
+              const rendered: ReactNode[] = [];
+              for (let idx = 0; idx < messages.length;) {
+                const msg = messages[idx];
+                if (msg.role !== "user") {
+                  rendered.push(renderMessage(idx));
+                  idx += 1;
+                  continue;
+                }
+
+                const userIdx = idx;
+                let endIdx = userIdx + 1;
+                while (endIdx < messages.length && messages[endIdx].role !== "user") endIdx += 1;
+
+                const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
+
+                if (finalAssistantIdx === -1) {
+                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+                    rendered.push(renderMessage(renderIdx));
+                  }
+                  idx = endIdx;
+                  continue;
+                }
+
+                const isLiveTail = (agentRunning || streamState.isStreaming) && endIdx === messages.length && userIdx === lastUserIdx;
+                if (isLiveTail) {
+                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+                    rendered.push(renderMessage(renderIdx));
+                  }
+                  idx = endIdx;
+                  continue;
+                }
+
+                rendered.push(renderMessage(userIdx));
+
+                const processIndices: number[] = [];
+                for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
+                  processIndices.push(processIdx);
+                }
+                const visibleProcessIndices = processIndices.filter((processIdx) => hasDisplayableProcessMessage(messages[processIdx]));
+                const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
+                const finalSplit = splitFinalAssistantBlocks(finalAssistant);
+                const finalProcessMessage = finalSplit.processBlocks.length > 0
+                  ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
+                  : null;
+                const finalAnswerMessage = finalSplit.answerBlocks.length > 0
+                  ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
+                  : null;
+
+                const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
+                if (processCount > 0) {
+                  const processRefIdx = visibleProcessIndices
+                    .map((processIdx) => visibleRefIndexByMessage.get(processIdx))
+                    .find((value): value is number => typeof value === "number")
+                    ?? (finalAnswerMessage ? undefined : visibleRefIndexByMessage.get(finalAssistantIdx));
+                  const processGroup = (
+                    <ProcessDetailsGroup
+                      messageCount={processCount}
+                      toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
+                    >
+                      {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
+                      {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
+                    </ProcessDetailsGroup>
+                  );
+                  rendered.push(
+                    <div
+                      key={`process-group-${userIdx}-${finalAssistantIdx}`}
+                      ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
+                    >
+                      {processGroup}
+                    </div>,
+                  );
+                }
+
+                if (finalAnswerMessage) {
+                  rendered.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage }));
+                }
+                for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
+                  rendered.push(renderMessage(renderIdx));
+                }
+                idx = endIdx;
+              }
+              const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              return (
+                <>
+                  {hasMore && (
+                    <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
+                      Scroll up to load earlier messages ({startIndex} hidden)
+                    </div>
+                  )}
+                  {rendered.slice(startIndex)}
+                </>
+              );
+            })()}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
             )}
 
             {agentRunning && !streamState.streamingMessage && (
@@ -754,213 +1007,12 @@ function toTerminalKeyData(e: KeyboardEvent): string | null {
   }
 }
 
-const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
-const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/;
-const ANSI_SGR_RE = /\x1B\[([0-9;]*)m/g;
-
-const ANSI_8_COLORS = [
-  "#1f2937",
-  "#dc2626",
-  "#16a34a",
-  "#d97706",
-  "#2563eb",
-  "#9333ea",
-  "#0891b2",
-  "#6b7280",
-];
-
-const ANSI_BRIGHT_COLORS = [
-  "#9ca3af",
-  "#ef4444",
-  "#22c55e",
-  "#f59e0b",
-  "#3b82f6",
-  "#a855f7",
-  "#06b6d4",
-  "#e5e7eb",
-];
-
-function stripAnsi(text: string): string {
-  return text.replace(ANSI_ESCAPE_RE, "");
-}
-
-function visibleCharPositions(text: string): Array<{ start: number; end: number; char: string }> {
-  const positions: Array<{ start: number; end: number; char: string }> = [];
-  let i = 0;
-  while (i < text.length) {
-    if (text.charCodeAt(i) === 0x1b) {
-      const match = text.slice(i).match(ANSI_ESCAPE_AT_START_RE);
-      if (match) {
-        i += match[0].length;
-        continue;
-      }
-    }
-    const codePoint = text.codePointAt(i);
-    if (codePoint === undefined) break;
-    const char = String.fromCodePoint(codePoint);
-    positions.push({ start: i, end: i + char.length, char });
-    i += char.length;
-  }
-  return positions;
-}
-
-function removeVisibleCharAt(text: string, index: number): string {
-  const positions = visibleCharPositions(text);
-  const pos = positions[index];
-  if (!pos) return text;
-  return text.slice(0, pos.start) + text.slice(pos.end);
-}
-
-function firstVisibleChar(text: string): string | undefined {
-  return visibleCharPositions(text)[0]?.char;
-}
-
-function lastNonSpaceVisibleCharIndex(text: string): number {
-  const positions = visibleCharPositions(text);
-  for (let i = positions.length - 1; i >= 0; i--) {
-    if (positions[i].char.trim() !== "") return i;
-  }
-  return -1;
-}
-
-function trimEndVisibleSpaces(text: string): string {
-  let next = text;
-  while (true) {
-    const positions = visibleCharPositions(next);
-    const last = positions[positions.length - 1];
-    if (!last || last.char.trim() !== "") return next;
-    next = next.slice(0, last.start) + next.slice(last.end);
-  }
-}
-
-function normalizeCustomPanelLines(lines: string[]): string[] {
-  const horizontalFrameLine = /^[┌├└╭╰][─┬┴┼]+[┐┤┘╮╯]$/;
-  const normalized: string[] = [];
-
-  for (const rawLine of lines) {
-    const plain = stripAnsi(rawLine).trimEnd();
-    if (horizontalFrameLine.test(plain)) continue;
-
-    let line = rawLine;
-    const first = firstVisibleChar(line);
-    if (first === "│" || first === "┃") {
-      line = removeVisibleCharAt(line, 0);
-      if (firstVisibleChar(line) === " ") line = removeVisibleCharAt(line, 0);
-    }
-
-    const rightBorderIndex = lastNonSpaceVisibleCharIndex(line);
-    const rightBorder = rightBorderIndex >= 0 ? visibleCharPositions(line)[rightBorderIndex]?.char : undefined;
-    if (rightBorder === "│" || rightBorder === "┃") {
-      line = removeVisibleCharAt(line, rightBorderIndex);
-    }
-
-    normalized.push(trimEndVisibleSpaces(line));
-  }
-
-  while (normalized.length > 0 && stripAnsi(normalized[0]).trim() === "") normalized.shift();
-  while (normalized.length > 0 && stripAnsi(normalized[normalized.length - 1]).trim() === "") normalized.pop();
-  return normalized.length ? normalized : lines;
-}
-
-function ansi256Color(index: number): string | undefined {
-  if (index >= 0 && index < 8) return ANSI_8_COLORS[index];
-  if (index >= 8 && index < 16) return ANSI_BRIGHT_COLORS[index - 8];
-  if (index >= 16 && index <= 231) {
-    const n = index - 16;
-    const r = Math.floor(n / 36);
-    const g = Math.floor((n % 36) / 6);
-    const b = n % 6;
-    const scale = (v: number) => v === 0 ? 0 : 55 + v * 40;
-    return `rgb(${scale(r)}, ${scale(g)}, ${scale(b)})`;
-  }
-  if (index >= 232 && index <= 255) {
-    const gray = 8 + (index - 232) * 10;
-    return `rgb(${gray}, ${gray}, ${gray})`;
-  }
-  return undefined;
-}
-
-function applyAnsiCodes(style: CSSProperties, codes: number[]): CSSProperties {
-  const next: CSSProperties = { ...style };
-  for (let i = 0; i < codes.length; i++) {
-    const code = codes[i];
-    if (code === 0) {
-      for (const key of Object.keys(next) as Array<keyof CSSProperties>) delete next[key];
-    } else if (code === 1) {
-      next.fontWeight = 700;
-    } else if (code === 2) {
-      next.opacity = 0.65;
-    } else if (code === 3) {
-      next.fontStyle = "italic";
-    } else if (code === 4) {
-      next.textDecoration = "underline";
-    } else if (code === 22) {
-      delete next.fontWeight;
-      delete next.opacity;
-    } else if (code === 23) {
-      delete next.fontStyle;
-    } else if (code === 24) {
-      delete next.textDecoration;
-    } else if (code === 39) {
-      delete next.color;
-    } else if (code === 49) {
-      delete next.backgroundColor;
-    } else if (code >= 30 && code <= 37) {
-      next.color = ANSI_8_COLORS[code - 30];
-    } else if (code >= 90 && code <= 97) {
-      next.color = ANSI_BRIGHT_COLORS[code - 90];
-    } else if (code >= 40 && code <= 47) {
-      next.backgroundColor = ANSI_8_COLORS[code - 40];
-    } else if (code >= 100 && code <= 107) {
-      next.backgroundColor = ANSI_BRIGHT_COLORS[code - 100];
-    } else if ((code === 38 || code === 48) && codes[i + 1] === 2) {
-      const [r, g, b] = [codes[i + 2], codes[i + 3], codes[i + 4]];
-      if ([r, g, b].every((value) => typeof value === "number" && Number.isFinite(value))) {
-        if (code === 38) next.color = `rgb(${r}, ${g}, ${b})`;
-        else next.backgroundColor = `rgb(${r}, ${g}, ${b})`;
-      }
-      i += 4;
-    } else if ((code === 38 || code === 48) && codes[i + 1] === 5) {
-      const color = ansi256Color(codes[i + 2]);
-      if (color) {
-        if (code === 38) next.color = color;
-        else next.backgroundColor = color;
-      }
-      i += 2;
-    }
-  }
-  return next;
-}
-
 function renderAnsiLine(line: string, keyPrefix: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let style: CSSProperties = {};
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  ANSI_SGR_RE.lastIndex = 0;
-
-  while ((match = ANSI_SGR_RE.exec(line)) !== null) {
-    if (match.index > lastIndex) {
-      const text = line.slice(lastIndex, match.index);
-      nodes.push(Object.keys(style).length > 0
-        ? <span key={`${keyPrefix}-${nodes.length}`} style={style}>{text}</span>
-        : text);
-    }
-    const codes = match[1]
-      ? match[1].split(";").map((part) => Number(part || "0"))
-      : [0];
-    style = applyAnsiCodes(style, codes);
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < line.length) {
-    const text = line.slice(lastIndex);
-    nodes.push(Object.keys(style).length > 0
-      ? <span key={`${keyPrefix}-${nodes.length}`} style={style}>{text}</span>
-      : text);
-  }
-
-  return nodes;
+  return parseAnsiLine(line).map((segment, index) => (
+    Object.keys(segment.style).length > 0
+      ? <span key={`${keyPrefix}-${index}`} style={segment.style}>{segment.text}</span>
+      : segment.text
+  ));
 }
 
 function ExtensionCustomPanel({

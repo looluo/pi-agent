@@ -3,6 +3,7 @@ import type {
   SessionManager,
   SettingsManager,
   SlashCommandInfo,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 
 export interface ContextUsage {
@@ -104,7 +105,7 @@ export interface ExtensionUiContextLike {
   addAutocompleteProvider(): void;
   setEditorComponent(): void;
   getEditorComponent(): undefined;
-  readonly theme: unknown;
+  readonly theme: Theme;
   getAllThemes(): unknown[];
   getTheme(name: string): undefined;
   setTheme(theme: unknown): { success: boolean; error?: string };
@@ -120,7 +121,7 @@ export interface AgentSessionLike {
   readonly autoCompactionEnabled: boolean;
   readonly autoRetryEnabled: boolean;
   readonly model: ModelLike | undefined;
-  readonly modelRegistry: { find: (provider: string, modelId: string) => ModelLike | undefined };
+  readonly modelRuntime: { getModel: (provider: string, modelId: string) => ModelLike | undefined };
   readonly sessionManager: SessionManager;
   readonly settingsManager: SettingsManager;
   readonly agent: { state?: { systemPrompt?: string; thinkingLevel?: string } };

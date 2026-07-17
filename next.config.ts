@@ -10,8 +10,22 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"],
+  serverExternalPackages: [
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-tui",
+  ],
   allowedDevOrigins: ['192.168.*.*'],
+  async headers() {
+    return [
+      {
+        source: "/",
+        headers: [
+          { key: "Cache-Control", value: "private, no-cache, max-age=0, must-revalidate" },
+        ],
+      },
+    ];
+  },
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
     NEXT_PUBLIC_PI_VERSION: piVersion,
