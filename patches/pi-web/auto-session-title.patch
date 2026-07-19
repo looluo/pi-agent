@@ -1,13 +1,13 @@
 diff --git a/app/api/sessions/[id]/generate-title/route.ts b/app/api/sessions/[id]/generate-title/route.ts
 new file mode 100644
-index 0000000..9b046f0
+index 0000000..58578ca
 --- /dev/null
 +++ b/app/api/sessions/[id]/generate-title/route.ts
 @@ -0,0 +1,139 @@
 +import { NextResponse } from "next/server";
-+import { SessionManager, AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
++import { SessionManager, createAgentSessionServices, getAgentDir } from "@earendil-works/pi-coding-agent";
 +import { completeSimple } from "@earendil-works/pi-ai/compat";
-+import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
++import { resolveSessionPath, buildSessionContext, invalidateSessionListCache } from "@/lib/session-reader";
 +
 +const TITLE_PROMPT = `Summarize the following conversation in 3-8 words. Output ONLY the summary title, nothing else. No quotes, no punctuation at the end. Use the same language as the conversation.`;
 +
@@ -63,25 +63,24 @@ index 0000000..9b046f0
 +      ? conversationText.slice(0, MAX_CHARS) + "\n\n[... conversation truncated]"
 +      : conversationText;
 +
-+    const authStorage = AuthStorage.create();
-+    const registry = ModelRegistry.create(authStorage);
-+    const available = registry.getAvailable();
++    const services = await createAgentSessionServices({ cwd: sm.getHeader()?.cwd ?? process.cwd(), agentDir: getAgentDir() });
++    const available = await services.modelRuntime.getAvailable();
 +
 +    if (available.length === 0) {
 +      return NextResponse.json({ error: "No models available" }, { status: 400 });
 +    }
 +
 +    let model = context.model
-+      ? registry.find(context.model.provider, context.model.modelId)
++      ? services.modelRuntime.getModel(context.model.provider, context.model.modelId)
 +      : undefined;
 +
 +    if (!model) {
 +      model = available[0];
 +    }
 +
-+    const auth = await registry.getApiKeyAndHeaders(model);
-+    if (!auth.ok) {
-+      return NextResponse.json({ error: auth.error }, { status: 400 });
++    const resolved = await services.modelRuntime.getAuth(model);
++    if (!resolved?.auth.apiKey) {
++      return NextResponse.json({ error: "No API key found for title generation model" }, { status: 400 });
 +    }
 +
 +    const result = await completeSimple(
@@ -99,8 +98,8 @@ index 0000000..9b046f0
 +      {
 +        maxTokens: 2048,
 +        reasoning: "minimal",
-+        apiKey: auth.apiKey,
-+        ...(auth.headers ? { headers: auth.headers } : {}),
++        apiKey: resolved.auth.apiKey,
++        headers: resolved.auth.headers,
 +      }
 +    );
 +
@@ -134,6 +133,7 @@ index 0000000..9b046f0
 +    }
 +
 +    sm.appendSessionInfo(title);
++    invalidateSessionListCache();
 +
 +    return NextResponse.json({ title, skipped: false });
 +  } catch (error) {
@@ -144,10 +144,10 @@ index 0000000..9b046f0
 +  }
 +}
 diff --git a/components/AppShell.tsx b/components/AppShell.tsx
-index 7f7fc56..533e95b 100644
+index 9b47f8f..1e46a21 100644
 --- a/components/AppShell.tsx
 +++ b/components/AppShell.tsx
-@@ -255,6 +255,16 @@ export function AppShell() {
+@@ -256,6 +256,16 @@ export function AppShell() {
      setExplorerRefreshKey((k) => k + 1);
    }, []);
  
@@ -164,36 +164,36 @@ index 7f7fc56..533e95b 100644
    const handleSessionForked = useCallback((newSessionId: string) => {
      setRefreshKey((k) => k + 1);
      setSessionKey((k) => k + 1);
-@@ -977,6 +987,7 @@ export function AppShell() {
-               onSessionStatsChange={handleSessionStatsChange}
+@@ -991,6 +1001,7 @@ export function AppShell() {
                onSessionStatsPanelOpen={openSessionStatsPanel}
                onContextUsageChange={handleContextUsageChange}
+               onOpenFile={handleOpenLinkedFile}
 +              onTitleGenerated={handleTitleGenerated}
              />
            ) : showPlaceholder ? (
              activeCwd ? (
 diff --git a/components/ChatWindow.tsx b/components/ChatWindow.tsx
-index 25f1662..542b6a3 100644
+index cd0ac36..284ded7 100644
 --- a/components/ChatWindow.tsx
 +++ b/components/ChatWindow.tsx
-@@ -24,6 +24,7 @@ interface Props {
-   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
+@@ -34,6 +34,7 @@ interface Props {
    onSessionStatsPanelOpen?: () => void;
    onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+   onOpenFile?: (filePath: string) => void;
 +  onTitleGenerated?: (sessionId: string, title: string) => void;
  }
  
  function phaseLabel(phase: AgentPhase): string {
-@@ -43,7 +44,7 @@ const CHAT_MINIMAP_WIDTH = 36;
- const CHAT_COLUMN_PADDING = 16;
- const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
+@@ -140,7 +141,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
+   );
+ }
  
--export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange }: Props) {
-+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTitleGenerated }: Props) {
+-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
++export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onTitleGenerated }: Props) {
    const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
    const isMobile = useIsMobile();
  
-@@ -81,7 +82,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
+@@ -183,7 +184,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
      handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
    } = useAgentSession({
      session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
@@ -201,9 +201,9 @@ index 25f1662..542b6a3 100644
 +    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen, onTitleGenerated,
    });
  
-   // Push session stats up to AppShell for the top bar.
+   // Register the abort handler for the global Esc shortcut
 diff --git a/hooks/useAgentSession.ts b/hooks/useAgentSession.ts
-index 9577e5e..639ae3b 100644
+index 49710be..ff4d543 100644
 --- a/hooks/useAgentSession.ts
 +++ b/hooks/useAgentSession.ts
 @@ -148,6 +148,7 @@ export interface UseAgentSessionOptions {
@@ -214,7 +214,7 @@ index 9577e5e..639ae3b 100644
    setToolPreset?: (preset: "none" | "default" | "full") => void;
  }
  
-@@ -304,7 +305,7 @@ type SlashCommandsResponse = {
+@@ -321,7 +322,7 @@ type SlashCommandsResponse = {
  export function useAgentSession(opts: UseAgentSessionOptions) {
    const {
      session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
@@ -223,7 +223,7 @@ index 9577e5e..639ae3b 100644
    } = opts;
  
    const isNew = session === null && newSessionCwd !== null;
-@@ -820,6 +821,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
+@@ -872,6 +873,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
              })
              .catch(() => {});
          }
@@ -242,7 +242,7 @@ index 9577e5e..639ae3b 100644
          onAgentEnd?.();
          break;
        case "prompt_done":
-@@ -935,7 +948,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
+@@ -987,7 +1000,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
          handleExtensionUiRequest(event as ExtensionUiRequest);
          break;
      }

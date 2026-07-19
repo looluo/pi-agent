@@ -26,7 +26,7 @@ function replaceInFile(file, search, replacement) {
 }
 
 function applyPatch(file) {
-  run("git", ["apply", "--unidiff-zero", "--whitespace=nowarn", file], {
+  run("git", ["apply", "--ignore-space-change", "--whitespace=nowarn", file], {
     cwd: work,
     env: { ...process.env, GIT_CEILING_DIRECTORIES: root },
   });
@@ -51,103 +51,20 @@ function patchSessionSidebar(file) {
 
 function PiAgentTitle() {`);
 
-  const commitMarker = `  const commitCustomPath = useCallback(async () => {
-    const path = customPathValue.trim();
-    if (!path || customPathValidating) return;
+  const componentMarker = `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
+  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);`;
+  if (!text.includes(componentMarker)) throw new Error(`Expected SessionSidebar state marker not found in ${file}`);
+  text = text.replace(componentMarker, `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
+  useEffect(() => {
+    window.piDesktop = {
+      selectDirectory: async () => invokeTauri("select_directory") as Promise<string | null>,
+    };
+    return () => {
+      delete window.piDesktop;
+    };
+  }, []);
 
-    setCustomPathValidating(true);
-    setCustomPathError(null);
-    try {
-      const res = await fetch("/api/cwd/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path }),
-      });
-      const data = await res.json().catch(() => ({})) as { cwd?: string; error?: string };
-      if (!res.ok || data.error) {
-        setCustomPathError(data.error ?? \`HTTP \${res.status}\`);
-        return;
-      }
-      setSelectedCwd(data.cwd ?? path);
-      setCustomPathOpen(false);
-      setCustomPathValue("");
-      setDropdownOpen(false);
-    } catch (e) {
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCustomPathValidating(false);
-    }
-  }, [customPathValue, customPathValidating]);`;
-  if (!text.includes(commitMarker)) throw new Error(`Expected commitCustomPath block not found in ${file}`);
-  text = text.replace(commitMarker, `${commitMarker}
-
-  const commitPickedPath = useCallback(async (path: string) => {
-    const trimmed = path.trim();
-    if (!trimmed || customPathValidating) return;
-
-    setCustomPathValue(trimmed);
-    setCustomPathValidating(true);
-    setCustomPathError(null);
-    try {
-      const res = await fetch("/api/cwd/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: trimmed }),
-      });
-      const data = await res.json().catch(() => ({})) as { cwd?: string; error?: string };
-      if (!res.ok || data.error) {
-        setCustomPathError(data.error ?? \`HTTP \${res.status}\`);
-        return;
-      }
-      setSelectedCwd(data.cwd ?? trimmed);
-      setCustomPathOpen(false);
-      setCustomPathValue("");
-      setDropdownOpen(false);
-    } catch (e) {
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCustomPathValidating(false);
-    }
-  }, [customPathValidating]);
-
-  const browseCustomPath = useCallback(async () => {
-    setCustomPathError(null);
-    try {
-      const selected = await invokeTauri("select_directory") as string | null;
-      if (!selected) return;
-      await commitPickedPath(selected);
-    } catch (e) {
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-    }
-  }, [commitPickedPath]);`);
-
-  const buttonsMarker = `                  <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
-                    <button`;
-  if (!text.includes(buttonsMarker)) throw new Error(`Expected custom path button row not found in ${file}`);
-  text = text.replace(buttonsMarker, `                  <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        void browseCustomPath();
-                      }}
-                      disabled={customPathValidating}
-                      style={{
-                        flex: 1,
-                        padding: "4px 0",
-                        background: "var(--bg-hover)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 5,
-                        color: "var(--text-muted)",
-                        fontSize: 11,
-                        cursor: customPathValidating ? "not-allowed" : "pointer",
-                        opacity: customPathValidating ? 0.65 : 1,
-                      }}
-                    >
-                      Browse...
-                    </button>
-                    <button`);
+  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);`);
 
   writeFileSync(file, text);
 }
