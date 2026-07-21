@@ -69,6 +69,19 @@ function PiAgentTitle() {`);
   writeFileSync(file, text);
 }
 
+function copyRuntimeAssets() {
+  const themeDir = join("node_modules", "@earendil-works", "pi-coding-agent", "dist", "modes", "interactive", "theme");
+  for (const file of ["dark.json", "light.json", "theme-schema.json"]) {
+    const sourceFile = join(work, themeDir, file);
+    const targetFile = join(webapp, themeDir, file);
+    if (!existsSync(sourceFile)) {
+      throw new Error(`Expected runtime asset not found: ${sourceFile}`);
+    }
+    mkdirSync(dirname(targetFile), { recursive: true });
+    cpSync(sourceFile, targetFile);
+  }
+}
+
 rmSync(work, { recursive: true, force: true });
 rmSync(webapp, { recursive: true, force: true });
 mkdirSync(dirname(work), { recursive: true });
@@ -110,6 +123,7 @@ if (!existsSync(standalone)) {
 }
 
 cpSync(standalone, webapp, { recursive: true });
+copyRuntimeAssets();
 mkdirSync(join(webapp, ".next"), { recursive: true });
 cpSync(join(work, ".next", "static"), join(webapp, ".next", "static"), { recursive: true });
 if (existsSync(join(work, "public"))) {
