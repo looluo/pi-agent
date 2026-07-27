@@ -80,6 +80,24 @@ function copyRuntimeAssets() {
     mkdirSync(dirname(targetFile), { recursive: true });
     cpSync(sourceFile, targetFile);
   }
+
+  const piAiPackages = [
+    join("node_modules", "@earendil-works", "pi-ai"),
+    join("node_modules", "@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai"),
+  ];
+  for (const packageDir of piAiPackages) {
+    const targetPackageDir = join(webapp, packageDir);
+    if (!existsSync(targetPackageDir)) continue;
+
+    const sourceDir = join(work, packageDir, "dist", "auth", "oauth");
+    const targetDir = join(targetPackageDir, "dist", "auth", "oauth");
+    const githubCopilotSource = join(sourceDir, "github-copilot.js");
+    if (!existsSync(githubCopilotSource)) {
+      throw new Error(`Expected GitHub Copilot OAuth runtime asset not found: ${githubCopilotSource}`);
+    }
+    mkdirSync(dirname(targetDir), { recursive: true });
+    cpSync(sourceDir, targetDir, { recursive: true });
+  }
 }
 
 rmSync(work, { recursive: true, force: true });
@@ -102,7 +120,7 @@ replaceInFile(nextConfig, 'import { join } from "path";', 'import { join, resolv
 replaceInFile(
   nextConfig,
   "const nextConfig: NextConfig = {",
-  "const nextConfig: NextConfig = {\n  output: \"standalone\",\n  outputFileTracingRoot: resolve(__dirname),"
+  "const nextConfig: NextConfig = {\n  output: \"standalone\",\n  outputFileTracingRoot: resolve(__dirname),\n  experimental: { cpus: 1 },"
 );
 
 run("npm", ["ci"], { cwd: work });
