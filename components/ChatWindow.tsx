@@ -1,8 +1,9 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
+import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -70,6 +71,20 @@ function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endI
   return -1;
 }
 
+function getUserInputText(message: AgentMessage): string | null {
+  if (message.role !== "user") return null;
+  if (typeof message.content === "string") {
+    const text = message.content.trim();
+    return text.length > 0 ? text : null;
+  }
+  const text = message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+  return text.length > 0 ? text : null;
+}
+
 function countToolCalls(messages: AgentMessage[], indices: number[]): number {
   let count = 0;
   for (const idx of indices) {
@@ -85,6 +100,19 @@ function hasDisplayableProcessMessage(message: AgentMessage): boolean {
     return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
   }
   return message.role === "custom";
+}
+
+// A user message normally anchors a turn (user prompt → process → final
+// answer), and the process messages in between get folded into a collapsed
+// ProcessDetailsGroup. When compaction fires mid-turn, pi drops the original
+// user prompt and inserts a compaction summary (role "custom", customType
+// "compaction") in its place; the agent then keeps producing tool calls and a
+// final answer with no user message left to anchor them. Treat a compaction
+// summary as an anchor too, otherwise every post-compaction message renders
+// standalone and never collapses.
+function isGroupAnchor(message: AgentMessage): boolean {
+  if (message.role === "user") return true;
+  return message.role === "custom" && (message as CustomMessage).customType === "compaction";
 }
 
 function withAssistantBlocks(
@@ -166,7 +194,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -185,11 +213,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
+  const sessionBusy = agentRunning || bashRunning;
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
-    registerAbortHandler(agentRunning ? handleAbort : null);
-  }, [agentRunning, handleAbort]);
+    registerAbortHandler(sessionBusy ? handleAbort : null);
+  }, [sessionBusy, handleAbort]);
 
   // --- Lazy-load historical messages ---
   // Only render the last N messages initially. When the user scrolls to the
@@ -266,16 +295,28 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
   const onDrop = useCallback((files: File[]) => {
-    if (agentRunning) return;
+    if (sessionBusy) return;
     chatInputRef?.current?.addImages(files);
-  }, [agentRunning, chatInputRef]);
+  }, [sessionBusy, chatInputRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
   const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  const inputHistory = useMemo(() => {
+    const seen = new Set<string>();
+    const history: string[] = [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const text = getUserInputText(messages[i]);
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      history.push(text);
+      if (history.length >= 50) break;
+    }
+    return history.reverse();
+  }, [messages]);
   const messageRefs = useMessageRefs(visibleMessages.length);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
+  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
   const availableThinkingLevels = displayModelValue
@@ -294,11 +335,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
-      isStreaming={agentRunning}
+      isStreaming={sessionBusy}
       model={displayModelValue}
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
+      modelError={modelError}
       onModelChange={handleModelChange}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
@@ -313,6 +355,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
+      inputHistory={inputHistory}
       onRecallQueue={handleRecallQueue}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
@@ -353,7 +396,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {isDragOver && !agentRunning && (
+      {isDragOver && !sessionBusy && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             {[0, 0.8, 1.6].map((delay) => (
@@ -416,7 +459,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             >
               <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
                 <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: 0, color: "var(--text)", flexShrink: 0, whiteSpace: "nowrap" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Agent Web</span>
+                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
@@ -467,6 +510,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (messages[i].role === "user") { lastUserIdx = i; break; }
               }
+              // Anchor for live-tail detection: the last user message, or a
+              // compaction summary when compaction has replaced it mid-turn.
+              // Computed independently from lastUserIdx (which is kept for the
+              // scroll-to-user ref) because a compaction summary can sit after
+              // the last user message and anchor the still-streaming segment.
+              let lastAnchorIdx = -1;
+              for (let i = messages.length - 1; i >= 0; i--) {
+                if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
+              }
 
               const visibleRefIndexByMessage = new Map<number, number>();
               let refIdx = 0;
@@ -513,10 +565,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
                     entryId={entryIds[idx]}
-                    onFork={agentRunning || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
+                    onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
-                    onNavigate={agentRunning ? undefined : handleNavigate}
-                    prevAssistantEntryId={agentRunning ? undefined : prevAssistantEntryId}
+                    onNavigate={sessionBusy ? undefined : handleNavigate}
+                    prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
                     onEditContent={handleEditContent}
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
@@ -534,7 +586,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               const rendered: ReactNode[] = [];
               for (let idx = 0; idx < messages.length;) {
                 const msg = messages[idx];
-                if (msg.role !== "user") {
+                if (!isGroupAnchor(msg)) {
                   rendered.push(renderMessage(idx));
                   idx += 1;
                   continue;
@@ -542,7 +594,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
                 const userIdx = idx;
                 let endIdx = userIdx + 1;
-                while (endIdx < messages.length && messages[endIdx].role !== "user") endIdx += 1;
+                while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
 
                 const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
 
@@ -554,7 +606,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   continue;
                 }
 
-                const isLiveTail = (agentRunning || streamState.isStreaming) && endIdx === messages.length && userIdx === lastUserIdx;
+                const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
                 if (isLiveTail) {
                   for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
@@ -632,6 +684,24 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <div className="py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase)}</span>
               </div>
+            )}
+
+            {bashRunning && !pendingBash && (
+              <div className="py-2 text-[13px] text-text-muted">
+                <span className="animate-[pulse_1.5s_infinite]">Running command...</span>
+              </div>
+            )}
+
+            {pendingBash && (
+              <MessageView
+                message={{
+                  role: "bashExecution",
+                  command: pendingBash.command,
+                  output: "",
+                  excludeFromContext: pendingBash.excludeFromContext,
+                } as BashExecutionMessage}
+                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+              />
             )}
 
             {agentRunning && (
@@ -974,39 +1044,6 @@ function ExtensionDialog({
 
 type ExtensionCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 
-function toTerminalKeyData(e: KeyboardEvent): string | null {
-  if (e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
-    const ch = e.key.toLowerCase();
-    if (ch >= "a" && ch <= "z") {
-      return String.fromCharCode(ch.charCodeAt(0) - 96);
-    }
-  }
-
-  switch (e.key) {
-    case "ArrowUp":
-      return "\x1b[A";
-    case "ArrowDown":
-      return "\x1b[B";
-    case "ArrowRight":
-      return "\x1b[C";
-    case "ArrowLeft":
-      return "\x1b[D";
-    case "Enter":
-      return "\r";
-    case "Escape":
-      return "\x1b";
-    case "Backspace":
-      return "\x7f";
-    case "Tab":
-      return "\t";
-    case " ":
-      return " ";
-    default:
-      if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) return e.key;
-      return null;
-  }
-}
-
 function renderAnsiLine(line: string, keyPrefix: string): ReactNode[] {
   return parseAnsiLine(line).map((segment, index) => (
     Object.keys(segment.style).length > 0
@@ -1022,11 +1059,12 @@ function ExtensionCustomPanel({
   request: ExtensionCustomRequest;
   onInput: (request: ExtensionCustomRequest, data: string) => void;
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
   const displayLines = normalizeCustomPanelLines(request.lines);
 
   useEffect(() => {
-    panelRef.current?.focus();
+    inputRef.current?.focus();
   }, [request.id]);
 
   return (
@@ -1043,18 +1081,13 @@ function ExtensionCustomPanel({
       }}
     >
       <div
-        ref={panelRef}
-        tabIndex={0}
         role="dialog"
         aria-modal="true"
-        onKeyDown={(e) => {
-          const data = toTerminalKeyData(e);
-          if (!data) return;
-          e.preventDefault();
-          e.stopPropagation();
-          onInput(request, data);
+        onClick={(event) => {
+          if (!(event.target as HTMLElement).closest("button")) inputRef.current?.focus();
         }}
         style={{
+          position: "relative",
           width: "min(920px, 100%)",
           maxHeight: "min(760px, calc(100vh - 40px))",
           border: "1px solid var(--border)",
@@ -1065,6 +1098,54 @@ function ExtensionCustomPanel({
           outline: "none",
         }}
       >
+        <textarea
+          ref={inputRef}
+          aria-label="Extension terminal input"
+          autoCapitalize="off"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          onKeyDown={(event) => {
+            if (composingRef.current || event.nativeEvent.isComposing) return;
+            const data = toTerminalKeyData(event);
+            if (!data) return;
+            event.preventDefault();
+            event.stopPropagation();
+            onInput(request, data);
+          }}
+          onInput={(event) => {
+            if (composingRef.current || event.nativeEvent.isComposing) return;
+            const text = event.currentTarget.value;
+            event.currentTarget.value = "";
+            if (text) onInput(request, text);
+          }}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={(event) => {
+            composingRef.current = false;
+            const input = event.currentTarget;
+            queueMicrotask(() => {
+              const text = input.value;
+              input.value = "";
+              if (text) onInput(request, text);
+            });
+          }}
+          onPaste={(event) => {
+            event.preventDefault();
+            const text = event.clipboardData.getData("text");
+            if (text) onInput(request, asBracketedPaste(text));
+          }}
+          style={{
+            position: "absolute",
+            width: 1,
+            height: 1,
+            padding: 0,
+            border: 0,
+            opacity: 0,
+            pointerEvents: "none",
+          }}
+        />
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650 }}>Extension panel</div>
           <button

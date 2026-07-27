@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
+import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 
 declare global {
@@ -17,6 +18,7 @@ interface Props {
   onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
   initialSessionId?: string | null;
+  skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
@@ -24,6 +26,7 @@ interface Props {
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
   explorerRefreshKey?: number;
+  onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
 }
@@ -276,12 +279,12 @@ function useScramble(target: string, running: boolean): string {
   return display;
 }
 
-function PiAgentTitle() {
+function PiWebTitle() {
   const [showVersion, setShowVersion] = useState(false);
   const [scrambling, setScrambling] = useState(false);
   const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Agent Web";
+  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Web";
   const display = useScramble(target, scrambling);
 
   const triggerScramble = useCallback((toVersion: boolean) => {
@@ -319,7 +322,7 @@ function PiAgentTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -331,7 +334,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [customPathValue, setCustomPathValue] = useState("");
   const [customPathError, setCustomPathError] = useState<string | null>(null);
   const [customPathValidating, setCustomPathValidating] = useState(false);
-  const customPathInputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   // Worktree switcher state
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
@@ -438,9 +440,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         return next;
       });
     }
+    if (completedInBackground.length > 0) {
+      loadSessions(false);
+    }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId]);
+  }, [runningSessionIds, selectedSessionId, loadSessions]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -534,7 +539,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
-    if (allSessions.length === 0) return;
+    if (allSessions.length === 0 || skipInitialProjectSelection) return;
 
     if (selectedCwd === null) {
       // If restoring a session, set cwd to match that session
@@ -552,7 +557,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const projects = getRecentProjects(allSessions);
       if (projects.length > 0) setSelectedCwd(projects[0]);
     }
-  }, [allSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone]);
+  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
 
   const commitCustomPath = useCallback(async (candidate?: string) => {
     const path = (candidate ?? customPathValue).trim();
@@ -582,30 +587,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, [customPathValue, customPathValidating]);
 
-  const handleCustomPathClick = useCallback(async () => {
-    const desktop = window.piDesktop;
-    if (!desktop) {
-      setCustomPathOpen(true);
-      setCustomPathError(null);
-      setTimeout(() => customPathInputRef.current?.focus(), 0);
-      return;
-    }
-
-    try {
-      setCustomPathError(null);
-      const path = await desktop.selectDirectory();
-      if (path === null) return;
-
-      setCustomPathValue(path);
-      setCustomPathOpen(true);
-      await commitCustomPath(path);
-    } catch (e) {
-      setCustomPathOpen(true);
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-      setTimeout(() => customPathInputRef.current?.focus(), 0);
-    }
-  }, [commitCustomPath]);
-
+  const handleCustomPathClick = useCallback(() => {
+    setCustomPathOpen(true);
+    setCustomPathError(null);
+    setDropdownOpen(false);
+  }, []);
   const handleDefaultCwd = useCallback(async () => {
     try {
       const res = await fetch("/api/default-cwd", { method: "POST" });
@@ -694,9 +680,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setDropdownOpen(false);
         setProjectFilter("");
-        setCustomPathOpen(false);
-        setCustomPathValue("");
-        setCustomPathError(null);
       }
       if (wtDropdownRef.current && !wtDropdownRef.current.contains(e.target as Node)) {
         setWtDropdownOpen(false);
@@ -774,6 +757,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {customPathOpen && (
+        <DirectoryPicker
+          busy={customPathValidating}
+          error={customPathError}
+          onCancel={() => {
+            setCustomPathOpen(false);
+            setCustomPathError(null);
+          }}
+          onSelect={(path) => void commitCustomPath(path)}
+        />
+      )}
       {/* Header */}
       <div
         style={{
@@ -783,7 +777,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <PiAgentTitle />
+          <PiWebTitle />
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleNewSession}
@@ -1027,115 +1021,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 </button>
               )}
 
-              {/* Custom path entry */}
-              {!customPathOpen ? (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handleCustomPathClick();
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    width: "100%",
-                    padding: "8px 10px",
-                    background: "none",
-                    border: "none",
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 11,
-                  }}
-                >
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                    <line x1="5" y1="1" x2="5" y2="9" />
-                    <line x1="1" y1="5" x2="9" y2="5" />
-                  </svg>
-                  <span>Custom path…</span>
-                </button>
-              ) : (
-                <div style={{ padding: "6px 8px", borderTop: visibleProjects.length > 0 ? "none" : undefined }}>
-                  <input
-                    ref={customPathInputRef}
-                    value={customPathValue}
-                    onChange={(e) => {
-                      setCustomPathValue(e.target.value);
-                      setCustomPathError(null);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        void commitCustomPath();
-                      }
-                      if (e.key === "Escape") {
-                        setCustomPathOpen(false);
-                        setCustomPathValue("");
-                        setCustomPathError(null);
-                      }
-                    }}
-                    placeholder="/path/to/project"
-                    style={{
-                      width: "100%",
-                      fontSize: 11,
-                      fontFamily: "var(--font-mono)",
-                      padding: "5px 8px",
-                      border: "1px solid var(--accent)",
-                      borderRadius: 5,
-                      outline: "none",
-                      background: "var(--bg)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                  {customPathError && (
-                    <div style={{
-                      marginTop: 5,
-                      color: "#dc2626",
-                      fontSize: 11,
-                      lineHeight: 1.35,
-                      overflowWrap: "anywhere",
-                    }}>
-                      {customPathError}
-                    </div>
-                  )}
-                  <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
-                    <button
-                      onClick={() => void commitCustomPath()}
-                      disabled={customPathValidating || !customPathValue.trim()}
-                      style={{
-                        flex: 1,
-                        padding: "4px 0",
-                        background: "var(--accent)",
-                        border: "none",
-                        borderRadius: 5,
-                        color: "#fff",
-                        fontSize: 11,
-                        fontWeight: 600,
-                        cursor: customPathValidating || !customPathValue.trim() ? "not-allowed" : "pointer",
-                        opacity: customPathValidating || !customPathValue.trim() ? 0.65 : 1,
-                      }}
-                    >
-                      {customPathValidating ? "Checking…" : "Open"}
-                    </button>
-                    <button
-                      onClick={() => { setCustomPathOpen(false); setCustomPathValue(""); setCustomPathError(null); }}
-                      style={{
-                        flex: 1,
-                        padding: "4px 0",
-                        background: "var(--bg-hover)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 5,
-                        color: "var(--text-muted)",
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
+              {/* Custom path directory picker */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleCustomPathClick();
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  width: "100%",
+                  padding: "8px 10px",
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontSize: 11,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                  <line x1="5" y1="1" x2="5" y2="9" />
+                  <line x1="1" y1="5" x2="9" y2="5" />
+                </svg>
+                <span>Custom path…</span>
+              </button>
           </AnimatedDropdown>
         </div>
 
@@ -1563,7 +1474,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             )}
             <button
               onClick={() => {
-                setExplorerKey((k) => k + 1);
+                if (onExplorerRefresh) onExplorerRefresh();
+                else setExplorerKey((k) => k + 1);
                 setExplorerRefreshDone(true);
                 if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
                 explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
@@ -1943,15 +1855,20 @@ function SessionItem({
                 lineHeight: 1.4,
                 color: "var(--text)",
               }}
-              title={isRunning ? `${title} · Agent running…` : isUnread ? `${title} · New activity` : title}
+              title={title}
             >
-              {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : null}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                 {title}
               </span>
             </div>
-            <div style={{ marginTop: 2, display: "flex", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
+              {isRunning ? (
+                <RunningSessionIndicator />
+              ) : isUnread ? (
+                <UnreadSessionIndicator />
+              ) : (
+                <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+              )}
               <span>{session.messageCount} msgs</span>
               {session.worktreeBranch && (
                 <span
