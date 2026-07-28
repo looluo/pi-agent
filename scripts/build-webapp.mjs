@@ -25,18 +25,11 @@ function replaceInFile(file, search, replacement) {
   writeFileSync(file, text.replace(search, replacement));
 }
 
-function applyPatch(file) {
-  run("git", ["apply", "--ignore-space-change", "--whitespace=nowarn", file], {
-    cwd: work,
-    env: { ...process.env, GIT_CEILING_DIRECTORIES: root },
-  });
-}
-
 function patchSessionSidebar(file) {
   let text = readFileSync(file, "utf8");
 
-  const titleMarker = "function PiAgentTitle() {";
-  if (!text.includes(titleMarker)) throw new Error(`Expected PiAgentTitle marker not found in ${file}`);
+  const titleMarker = "function PiWebTitle() {";
+  if (!text.includes(titleMarker)) throw new Error(`Expected PiWebTitle marker not found in ${file}`);
   text = text.replace(titleMarker, `function invokeTauri(command: string, args?: Record<string, unknown>) {
   const tauri = (globalThis as typeof globalThis & {
     __TAURI__?: {
@@ -49,12 +42,12 @@ function patchSessionSidebar(file) {
   return invoke(command, args);
 }
 
-function PiAgentTitle() {`);
+function PiWebTitle() {`);
 
-  const componentMarker = `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
+  const componentMarker = `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);`;
   if (!text.includes(componentMarker)) throw new Error(`Expected SessionSidebar state marker not found in ${file}`);
-  text = text.replace(componentMarker, `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
+  text = text.replace(componentMarker, `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
   useEffect(() => {
     window.piDesktop = {
       selectDirectory: async () => invokeTauri("select_directory") as Promise<string | null>,
@@ -111,9 +104,8 @@ cpSync(source, work, {
   filter: (path) => !path.includes(`${source}\\.git`) && !path.includes(`${source}/.git`) && !path.includes("node_modules") && !path.includes(".next"),
 });
 
-replaceInFile(join(work, "app", "layout.tsx"), 'title: "Pi Agent Web"', 'title: "Pi Agent App"');
+replaceInFile(join(work, "app", "layout.tsx"), 'title: "Pi Web"', 'title: "Pi Agent App"');
 patchSessionSidebar(join(work, "components", "SessionSidebar.tsx"));
-applyPatch(join(root, "patches", "pi-web", "auto-session-title.patch"));
 
 const nextConfig = join(work, "next.config.ts");
 replaceInFile(nextConfig, 'import { join } from "path";', 'import { join, resolve } from "path";');
@@ -131,7 +123,6 @@ run("npm", ["run", "build"], {
     HOME: safeHome,
     USERPROFILE: safeHome,
     NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=4096 --max-semi-space-size=256"].filter(Boolean).join(" "),
-    NEXT_PRIVATE_BUILD_WORKER: "1",
   },
 });
 
