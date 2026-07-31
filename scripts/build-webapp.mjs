@@ -44,11 +44,9 @@ function patchSessionSidebar(file) {
 
 function PiWebTitle() {`);
 
-  const componentMarker = `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);`;
+  const componentMarker = "  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);";
   if (!text.includes(componentMarker)) throw new Error(`Expected SessionSidebar state marker not found in ${file}`);
-  text = text.replace(componentMarker, `export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
-  useEffect(() => {
+  text = text.replace(componentMarker, `  useEffect(() => {
     window.piDesktop = {
       selectDirectory: async () => invokeTauri("select_directory") as Promise<string | null>,
     };
@@ -57,7 +55,7 @@ function PiWebTitle() {`);
     };
   }, []);
 
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);`);
+${componentMarker}`);
 
   writeFileSync(file, text);
 }
